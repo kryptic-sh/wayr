@@ -842,7 +842,25 @@ impl Dispatch<WlKeyboard, ()> for State {
                 let keycode = xkbcommon::xkb::Keycode::new(key + 8);
                 let keysym = xkb.state.key_get_one_sym(keycode);
                 let text = xkb.state.key_get_utf8(keycode);
-                let text_opt = if text.is_empty() { None } else { Some(text) };
+                // xkbcommon returns control characters for Return ("\r"),
+                // BackSpace ("\u{8}"), Tab ("\t"), Escape ("\u{1b}"),
+                // Delete ("\u{7f}"), and similar — strip those from
+                // `text` so consumers can use "text => printable
+                // character, key_code => everything else" semantics
+                // without having to filter ASCII controls themselves.
+                // Matches winit's `KeyEvent::text` behaviour (winit
+                // also excludes control characters from `text`).
+                let text_opt = if text.is_empty()
+                    || (text.chars().count() == 1
+                        && text
+                            .chars()
+                            .next()
+                            .is_some_and(|c| (c as u32) < 0x20 || (c as u32) == 0x7f))
+                {
+                    None
+                } else {
+                    Some(text)
+                };
 
                 let key_name = xkbcommon::xkb::keysym_get_name(keysym);
                 let key_code = if !key_name.is_empty() {

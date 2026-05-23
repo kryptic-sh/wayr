@@ -8,6 +8,25 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-05-23
+
+### Fixed
+
+- `KeyEvent::text` no longer carries ASCII control characters (`"\r"` for
+  Return, `"\u{8}"` for BackSpace, `"\t"` for Tab, `"\u{1b}"` for Escape,
+  `"\u{7f}"` for Delete, …). xkbcommon emits these alongside the keysym name,
+  but consumers consistently want a clean "text => printable character; key_code
+  => everything else" dispatch — the previous behaviour forced every consumer to
+  add an `is_ascii_control` filter before reading `text`. wayr now applies the
+  filter at the source. Matches winit's `KeyEvent::text` semantics.
+
+### Changed
+
+- `KeyEvent::text` docstring updated to spell out the control-character
+  exclusion and that `Some("")` never occurs.
+
+[0.1.2]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.2
+
 ## [0.1.1] - 2026-05-23
 
 ### Fixed
