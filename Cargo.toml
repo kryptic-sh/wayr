@@ -17,7 +17,7 @@ categories = ["gui", "os::linux-apis"]
 # what they need — pikr enables `layer-shell`, buffr enables
 # `subsurface + text-input + clipboard + cursor-shape + fractional-scale`.
 default = []
-layer-shell = []
+layer-shell = ["dep:wayland-protocols-wlr"]
 subsurface = []
 text-input = []
 clipboard = []
@@ -26,15 +26,26 @@ fractional-scale = []
 
 [dependencies]
 # Used by layer-shell `Anchor` flags and text-input `ContentHint`.
-# Light + zero-deps; carrying it in the API skeleton is cheap.
 bitflags = "2"
 
-# Real protocol deps land with #4 (connection + registry):
-# wayland-client, wayland-protocols, calloop, xkbcommon.
+# Wayland protocol primitives + connection management.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = true }
+
+# Logging — used internally for diagnostic warnings (missing globals,
+# protocol errors). Consumer apps set their own subscriber.
+tracing = "0.1"
+
+# Event-loop driver. calloop sits over poll(); wayland-client provides
+# a calloop adapter that registers the wl_display fd as a source.
+calloop = "0.14"
+calloop-wayland-source = "0.4"
 
 [dev-dependencies]
-# examples/ smoke tests will pull wgpu here once #6 (raw-window-handle)
-# lands. Empty for now so scaffold builds cleanly.
+# examples/ smoke tests pull wgpu here once #6 (raw-window-handle)
+# lands. Connection tests use tracing-subscriber for log surfacing.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Examples land per-phase. `toplevel` arrives with #9; `layer-shell`
 # with #11; `subsurface` with #12; `ime` with #15; `clipboard` with #14.

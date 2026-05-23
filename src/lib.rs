@@ -73,6 +73,7 @@
 // completes.
 #![allow(dead_code)]
 
+mod connection;
 mod cursor;
 mod error;
 mod event;
