@@ -83,6 +83,7 @@ mod keyboard;
 mod pointer;
 mod surface;
 mod toplevel;
+mod touch;
 
 #[cfg(feature = "layer-shell")]
 mod layer_shell;
@@ -104,6 +105,7 @@ pub use crate::pointer::{
 };
 pub use crate::surface::{RawWindowHandlePlaceholder, Surface, SurfaceId};
 pub use crate::toplevel::{Toplevel, ToplevelBuilder};
+pub use crate::touch::{TouchEvent, TouchId, TouchPhase};
 
 #[cfg(feature = "layer-shell")]
 pub use crate::layer_shell::{

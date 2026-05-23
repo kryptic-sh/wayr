@@ -28,7 +28,10 @@ text-input = ["wayland-protocols/unstable"]
 # (orthogonal to wayr's connection) with text + HTML + RTF +
 # `image/png` MIME support, plus X11 / macOS / Windows / OSC52
 # fallback. No reason to duplicate.
-cursor-shape = []
+# wp_cursor_shape_manager_v1 — preferred cursor selection path (no
+# shm theme loading). Pulls `wayland-protocols/unstable` because the
+# cursor-shape staging protocol depends on `tablet/zv2`.
+cursor-shape = ["wayland-protocols/unstable"]
 fractional-scale = []
 
 [dependencies]

@@ -72,6 +72,13 @@ pub struct ScrollEvent {
     pub delta: f64,
     /// Discrete detent count (0 if source is not [`AxisSource::Wheel`]).
     pub discrete_steps: i32,
+    /// High-resolution scroll, in 1/120ths of a logical wheel detent
+    /// (`wl_pointer.axis_value120`, since `wl_pointer` v8). Positive
+    /// values follow the same sign convention as [`Self::delta`]. `0`
+    /// when the compositor advertises a `wl_pointer` version `< 8`
+    /// or the source is not [`AxisSource::Wheel`]; consumers that
+    /// want smooth scroll regardless prefer [`Self::delta`].
+    pub high_res_120: i32,
     /// What kind of input produced the event.
     pub source: AxisSource,
 }

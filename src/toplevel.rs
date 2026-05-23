@@ -9,7 +9,6 @@ use wayland_protocols::xdg::shell::client::xdg_surface::XdgSurface;
 use wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
 
 use crate::connection::ToplevelState;
-use crate::cursor::CursorIcon;
 use crate::error::Result;
 use crate::event_loop::EventLoop;
 use crate::geometry::Size;
@@ -78,6 +77,17 @@ impl Toplevel {
         std::ptr::NonNull::new(id.as_ptr().cast::<std::ffi::c_void>())
     }
 
+    /// Set the cursor shape shown when the pointer is over this
+    /// surface. Sticky until the next call.
+    ///
+    /// Wraps [`EventLoop::set_cursor`]; the cursor is per-seat in
+    /// wayland (not per-surface), so this method only takes effect
+    /// while *this* surface holds pointer focus.
+    #[cfg(feature = "cursor-shape")]
+    pub fn set_cursor<T>(&self, event_loop: &EventLoop<T>, icon: crate::CursorIcon) {
+        event_loop.set_cursor(icon);
+    }
+
     /// IME (text-input-v3) accessor. Returns `None` when the
     /// compositor doesn't advertise `zwp_text_input_manager_v3`
     /// (almost no modern compositors lack it — KWin / Mutter / sway
@@ -134,10 +144,6 @@ impl Surface for Toplevel {
         // RedrawRequested synthetically from the configure ack path,
         // so this is a no-op for now; #5/#7 wiring of frame callbacks
         // lands in a follow-up.
-    }
-
-    fn set_cursor(&self, _icon: CursorIcon) {
-        // Lands in #16.
     }
 
     fn raw_window_handle(&self) -> RawWindowHandlePlaceholder {

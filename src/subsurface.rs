@@ -20,7 +20,6 @@ use wayland_client::Proxy;
 use wayland_client::protocol::wl_subsurface::WlSubsurface;
 use wayland_client::protocol::wl_surface::WlSurface;
 
-use crate::cursor::CursorIcon;
 use crate::error::Result;
 use crate::event_loop::EventLoop;
 use crate::geometry::{Position, Rect, Size};
@@ -126,10 +125,6 @@ impl Surface for Subsurface {
     fn request_redraw(&self) {
         // Subsurfaces don't get configure-driven redraws; the
         // embedder paints when it has new content. No-op.
-    }
-
-    fn set_cursor(&self, _icon: CursorIcon) {
-        // #16.
     }
 
     fn raw_window_handle(&self) -> RawWindowHandlePlaceholder {

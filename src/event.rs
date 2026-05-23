@@ -4,6 +4,7 @@ use crate::geometry::Size;
 use crate::keyboard::{KeyEvent, Modifiers};
 use crate::pointer::{PointerButton, PointerButtonState, PointerPosition, ScrollEvent};
 use crate::surface::SurfaceId;
+use crate::touch::TouchEvent;
 
 #[cfg(feature = "text-input")]
 use crate::ime::ImeEvent;
@@ -104,6 +105,13 @@ pub enum WindowEvent {
 
     /// Scroll / wheel event.
     Scroll(ScrollEvent),
+
+    /// Touch event (`wl_touch`). Single contact per event; one
+    /// `wl_touch.frame` flushes multiple `Touch` events to the
+    /// application handler in order, so multi-touch consumers can
+    /// observe the simultaneous state by buffering until the next
+    /// non-touch event.
+    Touch(TouchEvent),
 
     /// Keyboard key event.
     Key(KeyEvent),

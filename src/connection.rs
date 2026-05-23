@@ -31,6 +31,7 @@ use wayland_client::protocol::wl_shm::WlShm;
 use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_client::protocol::wl_subsurface::WlSubsurface;
 use wayland_client::protocol::wl_surface::WlSurface;
+use wayland_client::protocol::wl_touch::{Event as WlTouchEvent, WlTouch};
 use wayland_client::{Connection as WlConnection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::xdg_surface::{Event as XdgSurfaceEvent, XdgSurface};
 use wayland_protocols::xdg::shell::client::xdg_toplevel::{
@@ -46,6 +47,7 @@ use crate::pointer::{
     AxisDirection, AxisSource, PointerButton, PointerButtonState, PointerPosition, ScrollEvent,
 };
 use crate::surface::SurfaceId;
+use crate::touch::{TouchEvent, TouchId, TouchPhase};
 
 #[cfg(feature = "text-input")]
 use crate::ime::ImeEvent;
@@ -55,6 +57,11 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::Z
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
     Event as TextInputV3Event, ZwpTextInputV3,
 };
+
+#[cfg(feature = "cursor-shape")]
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1;
+#[cfg(feature = "cursor-shape")]
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 
 /// Owning handle for the live Wayland connection + bound globals.
 ///
@@ -117,6 +124,12 @@ pub(crate) struct Globals {
     /// feature is on AND the compositor advertises it.
     #[cfg(feature = "text-input")]
     pub(crate) text_input_manager: Option<ZwpTextInputManagerV3>,
+
+    /// `wp_cursor_shape_manager_v1` — only when the `cursor-shape`
+    /// feature is on AND the compositor advertises it. Toplevel /
+    /// LayerSurface fall back to a no-op set_cursor when missing.
+    #[cfg(feature = "cursor-shape")]
+    pub(crate) cursor_shape_manager: Option<WpCursorShapeManagerV1>,
 }
 
 /// Per-layer-surface state, parallel to [`ToplevelState`]. Shared
@@ -227,14 +240,40 @@ pub(crate) struct PointerState {
     /// Surface the pointer is currently over. `None` between
     /// enter/leave pairs.
     pub(crate) focused_surface: Option<SurfaceId>,
+    /// Latest `wl_pointer.enter` serial. Required when calling
+    /// `wp_cursor_shape_device_v1.set_shape(serial, …)` — the
+    /// compositor ignores the request unless the serial matches.
+    pub(crate) enter_serial: u32,
     /// Accumulated axis state since the last wl_pointer.frame. v0.1
     /// flushes on every `frame` event; finer batching is post-MVP.
     pub(crate) axis_vertical: f64,
     pub(crate) axis_horizontal: f64,
     pub(crate) axis_discrete_v: i32,
     pub(crate) axis_discrete_h: i32,
+    pub(crate) axis_value120_v: i32,
+    pub(crate) axis_value120_h: i32,
     pub(crate) axis_source: Option<AxisSource>,
     pub(crate) axis_pending: bool,
+    /// Cursor-shape device for this pointer. Eagerly created in the
+    /// `WlSeat::Capabilities` dispatch when both the pointer cap is
+    /// present and the cursor-shape manager global was bound.
+    #[cfg(feature = "cursor-shape")]
+    pub(crate) cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+}
+
+/// Per-touch state. v0.1 supports a single seat touch; multi-seat /
+/// multi-touchscreen is post-MVP.
+#[derive(Default)]
+pub(crate) struct TouchState {
+    /// `wl_touch` proxy if the seat advertised the touch capability.
+    pub(crate) wl_touch: Option<WlTouch>,
+    /// Last known position per active contact, so [`TouchPhase::Ended`]
+    /// / [`TouchPhase::Cancelled`] events can carry the contact's
+    /// final position (the protocol's `up` event has no coords).
+    pub(crate) positions: HashMap<i32, Position>,
+    /// Which surface every active contact entered on. Cleared on `up`
+    /// / `cancel` so an entry only exists between matching down / up.
+    pub(crate) surfaces: HashMap<i32, SurfaceId>,
 }
 
 /// Dispatch state. Threaded through every wayland-client `Dispatch`
@@ -268,6 +307,16 @@ pub(crate) struct State {
 
     /// Keyboard state.
     pub(crate) keyboard: KeyboardState,
+
+    /// Touch state.
+    pub(crate) touch: TouchState,
+
+    /// Cursor-shape manager proxy clone — held in state so the
+    /// WlSeat::Capabilities dispatch can lazy-create a
+    /// `wp_cursor_shape_device_v1` once the pointer arrives. `None`
+    /// when the compositor doesn't advertise the global.
+    #[cfg(feature = "cursor-shape")]
+    pub(crate) cursor_shape_manager: Option<WpCursorShapeManagerV1>,
 
     /// Text-input (IME) state. v0.1 supports a single seat.
     #[cfg(feature = "text-input")]
@@ -351,6 +400,10 @@ impl Connection {
         let text_input_manager: Option<ZwpTextInputManagerV3> =
             bind_optional(&global_list, &qh, "zwp_text_input_manager_v3", 1);
 
+        #[cfg(feature = "cursor-shape")]
+        let cursor_shape_manager: Option<WpCursorShapeManagerV1> =
+            bind_optional(&global_list, &qh, "wp_cursor_shape_manager_v1", 2);
+
         Ok(Connection {
             wl,
             queue,
@@ -365,6 +418,8 @@ impl Connection {
                 layer_shell,
                 #[cfg(feature = "text-input")]
                 text_input_manager,
+                #[cfg(feature = "cursor-shape")]
+                cursor_shape_manager,
             },
         })
     }
@@ -505,15 +560,24 @@ impl Dispatch<WlSeat, ()> for State {
         } = event
         {
             if caps.contains(Capability::Pointer) && state.pointer.wl_pointer.is_none() {
-                state.pointer.wl_pointer = Some(seat.get_pointer(qh, ()));
+                let pointer = seat.get_pointer(qh, ());
+                #[cfg(feature = "cursor-shape")]
+                {
+                    if let Some(manager) = &state.cursor_shape_manager {
+                        state.pointer.cursor_shape_device =
+                            Some(manager.get_pointer(&pointer, qh, ()));
+                    }
+                }
+                state.pointer.wl_pointer = Some(pointer);
             }
             if caps.contains(Capability::Keyboard) && state.keyboard.wl_keyboard.is_none() {
                 state.keyboard.wl_keyboard = Some(seat.get_keyboard(qh, ()));
             }
-            // Capability::Touch handled in #16.
-            // text-input-v3: bound eagerly in `EventLoop::new`
-            // because we need the manager proxy + seat at the same
-            // time and they both exist by then. No work here.
+            if caps.contains(Capability::Touch) && state.touch.wl_touch.is_none() {
+                state.touch.wl_touch = Some(seat.get_touch(qh, ()));
+            }
+            // text-input-v3 + cursor-shape: bound from `EventLoop::new`
+            // (after seat + caps are both known). No work here.
         }
     }
 }
@@ -706,11 +770,12 @@ impl Dispatch<WlPointer, ()> for State {
     ) {
         match event {
             WlPointerEvent::Enter {
+                serial,
                 surface,
                 surface_x,
                 surface_y,
-                ..
             } => {
+                state.pointer.enter_serial = serial;
                 if let Some(&id) = state.surface_id_by_wl.get(&surface) {
                     state.pointer.focused_surface = Some(id);
                     state.pending_events.push(Event::WindowEvent {
@@ -800,6 +865,18 @@ impl Dispatch<WlPointer, ()> for State {
                 }
                 state.pointer.axis_pending = true;
             }
+            WlPointerEvent::AxisValue120 { axis, value120 } => {
+                let axis_dir = match axis {
+                    WEnum::Value(wl_pointer::Axis::VerticalScroll) => AxisDirection::Vertical,
+                    WEnum::Value(wl_pointer::Axis::HorizontalScroll) => AxisDirection::Horizontal,
+                    _ => return,
+                };
+                match axis_dir {
+                    AxisDirection::Vertical => state.pointer.axis_value120_v += value120,
+                    AxisDirection::Horizontal => state.pointer.axis_value120_h += value120,
+                }
+                state.pointer.axis_pending = true;
+            }
             WlPointerEvent::AxisSource { axis_source } => {
                 state.pointer.axis_source = match axis_source {
                     WEnum::Value(wl_pointer::AxisSource::Wheel) => Some(AxisSource::Wheel),
@@ -825,33 +902,41 @@ impl Dispatch<WlPointer, ()> for State {
                     }
                 };
                 let source = state.pointer.axis_source.unwrap_or(AxisSource::Wheel);
-                if state.pointer.axis_vertical != 0.0 || state.pointer.axis_discrete_v != 0 {
+                if state.pointer.axis_vertical != 0.0
+                    || state.pointer.axis_discrete_v != 0
+                    || state.pointer.axis_value120_v != 0
+                {
                     state.pending_events.push(Event::WindowEvent {
                         surface_id: id,
                         event: WindowEvent::Scroll(ScrollEvent {
                             axis: AxisDirection::Vertical,
                             delta: state.pointer.axis_vertical,
                             discrete_steps: state.pointer.axis_discrete_v,
+                            high_res_120: state.pointer.axis_value120_v,
                             source,
                         }),
                     });
                 }
-                if state.pointer.axis_horizontal != 0.0 || state.pointer.axis_discrete_h != 0 {
+                if state.pointer.axis_horizontal != 0.0
+                    || state.pointer.axis_discrete_h != 0
+                    || state.pointer.axis_value120_h != 0
+                {
                     state.pending_events.push(Event::WindowEvent {
                         surface_id: id,
                         event: WindowEvent::Scroll(ScrollEvent {
                             axis: AxisDirection::Horizontal,
                             delta: state.pointer.axis_horizontal,
                             discrete_steps: state.pointer.axis_discrete_h,
+                            high_res_120: state.pointer.axis_value120_h,
                             source,
                         }),
                     });
                 }
                 state.pointer.reset_axis();
             }
-            // AxisStop / AxisRelativeDirection / AxisValue120 are
-            // refinements for high-res scroll. v0.1 ignores; #16
-            // polish will surface value120 for smooth scroll.
+            // AxisStop / AxisRelativeDirection are refinements wayr
+            // doesn't surface yet — they signal kinetic-scroll
+            // boundaries and natural-scroll direction respectively.
             _ => {}
         }
     }
@@ -863,6 +948,8 @@ impl PointerState {
         self.axis_horizontal = 0.0;
         self.axis_discrete_v = 0;
         self.axis_discrete_h = 0;
+        self.axis_value120_v = 0;
+        self.axis_value120_h = 0;
         self.axis_source = None;
         self.axis_pending = false;
     }
@@ -1252,6 +1339,122 @@ impl
             }
             _ => {}
         }
+    }
+}
+
+impl Dispatch<WlTouch, ()> for State {
+    fn event(
+        state: &mut Self,
+        _touch: &WlTouch,
+        event: <WlTouch as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            WlTouchEvent::Down {
+                surface, id, x, y, ..
+            } => {
+                let surface_id = match state.surface_id_by_wl.get(&surface) {
+                    Some(&id) => id,
+                    None => return,
+                };
+                let pos = Position::new(x as i32, y as i32);
+                state.touch.positions.insert(id, pos);
+                state.touch.surfaces.insert(id, surface_id);
+                state.pending_events.push(Event::WindowEvent {
+                    surface_id,
+                    event: WindowEvent::Touch(TouchEvent {
+                        id: TouchId(id),
+                        phase: TouchPhase::Started,
+                        position: pos,
+                    }),
+                });
+            }
+            WlTouchEvent::Motion { id, x, y, .. } => {
+                let pos = Position::new(x as i32, y as i32);
+                state.touch.positions.insert(id, pos);
+                let surface_id = match state.touch.surfaces.get(&id) {
+                    Some(&s) => s,
+                    None => return,
+                };
+                state.pending_events.push(Event::WindowEvent {
+                    surface_id,
+                    event: WindowEvent::Touch(TouchEvent {
+                        id: TouchId(id),
+                        phase: TouchPhase::Moved,
+                        position: pos,
+                    }),
+                });
+            }
+            WlTouchEvent::Up { id, .. } => {
+                let surface_id = match state.touch.surfaces.remove(&id) {
+                    Some(s) => s,
+                    None => return,
+                };
+                let pos = state.touch.positions.remove(&id).unwrap_or_default();
+                state.pending_events.push(Event::WindowEvent {
+                    surface_id,
+                    event: WindowEvent::Touch(TouchEvent {
+                        id: TouchId(id),
+                        phase: TouchPhase::Ended,
+                        position: pos,
+                    }),
+                });
+            }
+            WlTouchEvent::Cancel => {
+                // Cancel all active contacts. Compositor consumed the
+                // gesture itself (system swipe etc.).
+                let active: Vec<i32> = state.touch.surfaces.keys().copied().collect();
+                for id in active {
+                    let surface_id = match state.touch.surfaces.remove(&id) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let pos = state.touch.positions.remove(&id).unwrap_or_default();
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id,
+                        event: WindowEvent::Touch(TouchEvent {
+                            id: TouchId(id),
+                            phase: TouchPhase::Cancelled,
+                            position: pos,
+                        }),
+                    });
+                }
+            }
+            // Frame / Shape / Orientation are batching + finger
+            // ergonomics refinements; v0.1 surfaces each Touch event
+            // individually and ignores the rest.
+            _ => {}
+        }
+    }
+}
+
+#[cfg(feature = "cursor-shape")]
+impl Dispatch<WpCursorShapeManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpCursorShapeManagerV1,
+        _: <WpCursorShapeManagerV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        // No events on the manager.
+    }
+}
+
+#[cfg(feature = "cursor-shape")]
+impl Dispatch<WpCursorShapeDeviceV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpCursorShapeDeviceV1,
+        _: <WpCursorShapeDeviceV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        // No events on the device.
     }
 }
 

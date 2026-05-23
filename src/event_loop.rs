@@ -62,6 +62,10 @@ impl<T> EventLoop<T> {
     /// dispatch events.
     pub fn new() -> Result<Self> {
         let connection = Connection::connect_to_env()?;
+        #[cfg_attr(
+            not(any(feature = "text-input", feature = "cursor-shape")),
+            allow(unused_mut)
+        )]
         let mut state = State::default();
         let (user_tx, user_rx) = mpsc::channel();
 
@@ -75,6 +79,14 @@ impl<T> EventLoop<T> {
             let qh = connection.queue.handle();
             let ti = manager.get_text_input(&connection.globals.seat, &qh, ());
             state.text_input.wp = Some(ti);
+        }
+
+        // Cursor-shape manager: cloned into state so the
+        // `WlSeat::Capabilities` dispatch can lazy-create the
+        // `wp_cursor_shape_device_v1` once the pointer cap arrives.
+        #[cfg(feature = "cursor-shape")]
+        {
+            state.cursor_shape_manager = connection.globals.cursor_shape_manager.clone();
         }
 
         Ok(Self {
@@ -133,6 +145,22 @@ impl<T> EventLoop<T> {
     /// Request the loop exit after the current iteration.
     pub fn exit(&mut self) {
         self.state.exit_requested = true;
+    }
+
+    /// Set the cursor shape shown over the currently-focused pointer
+    /// surface. The compositor only honours the request while one of
+    /// our surfaces holds pointer focus (the `enter` serial wayr
+    /// remembers must still match).
+    ///
+    /// No-op if (a) the `cursor-shape` feature is off, (b) the
+    /// compositor doesn't advertise `wp_cursor_shape_manager_v1`, or
+    /// (c) the seat has no pointer capability yet. Toplevel +
+    /// LayerSurface call this from their own `set_cursor` methods.
+    #[cfg(feature = "cursor-shape")]
+    pub fn set_cursor(&self, icon: crate::CursorIcon) {
+        if let Some(dev) = &self.state.pointer.cursor_shape_device {
+            dev.set_shape(self.state.pointer.enter_serial, icon.to_protocol());
+        }
     }
 
     /// Run the event loop blocking. Returns when [`EventLoop::exit`]

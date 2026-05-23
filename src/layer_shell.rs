@@ -161,6 +161,15 @@ impl LayerSurface {
     pub fn set_size(&self, size: Size) {
         self.layer_surface.set_size(size.width, size.height);
     }
+
+    /// Set the cursor shape shown when the pointer is over this
+    /// surface. See [`crate::Toplevel::set_cursor`] for caveats — the
+    /// cursor is per-seat, so this takes effect only while the
+    /// layer-surface holds pointer focus.
+    #[cfg(feature = "cursor-shape")]
+    pub fn set_cursor<T>(&self, event_loop: &EventLoop<T>, icon: CursorIcon) {
+        event_loop.set_cursor(icon);
+    }
 }
 
 impl Drop for LayerSurface {
@@ -187,10 +196,6 @@ impl Surface for LayerSurface {
         // Same caveat as Toplevel: frame-callback driven redraw
         // lands in a Phase 0 follow-up. v0.1 fires RedrawRequested
         // synthetically from the configure ack path.
-    }
-
-    fn set_cursor(&self, _icon: CursorIcon) {
-        // #16.
     }
 
     fn raw_window_handle(&self) -> RawWindowHandlePlaceholder {

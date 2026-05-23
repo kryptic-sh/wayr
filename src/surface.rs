@@ -2,7 +2,6 @@
 
 use std::num::NonZeroU64;
 
-use crate::cursor::CursorIcon;
 use crate::geometry::Size;
 
 /// Identifier unique per surface within a single [`crate::EventLoop`].
@@ -52,10 +51,6 @@ pub trait Surface {
     /// dispatched, which fires inside the frame callback. Repeated
     /// calls between callbacks coalesce.
     fn request_redraw(&self);
-
-    /// Set the cursor shape shown while the pointer is over this
-    /// surface. Sticky until the next call.
-    fn set_cursor(&self, icon: CursorIcon);
 
     /// Raw window handle (`wayland-display` + `wl_surface` pointer)
     /// for wgpu / vulkano / glow integration. Lifetime is bound to
