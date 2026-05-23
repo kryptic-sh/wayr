@@ -18,6 +18,9 @@ use std::rc::Rc;
 use tracing::{debug, warn};
 use wayland_client::globals::{Global, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_compositor::WlCompositor;
+use wayland_client::protocol::wl_keyboard::{
+    Event as WlKeyboardEvent, KeyState as WlKeyState, KeymapFormat, WlKeyboard,
+};
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_pointer::{
     self, ButtonState as WlButtonState, Event as WlPointerEvent, WlPointer,
@@ -37,7 +40,7 @@ use wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase;
 use crate::error::{Error, Result};
 use crate::event::{Event, WindowEvent};
 use crate::geometry::{Position, Size};
-use crate::keyboard::Modifiers;
+use crate::keyboard::{KeyCode, KeyEvent, KeyState as WayrKeyState, Modifiers, ScanCode};
 use crate::pointer::{
     AxisDirection, AxisSource, PointerButton, PointerButtonState, PointerPosition, ScrollEvent,
 };
@@ -127,6 +130,31 @@ pub(crate) struct ToplevelState {
     pub(crate) scale_factor: f64,
 }
 
+/// Per-keyboard state. v0.1 supports a single seat keyboard.
+#[derive(Default)]
+pub(crate) struct KeyboardState {
+    /// The `wl_keyboard` proxy when the seat advertised keyboard
+    /// capability.
+    pub(crate) wl_keyboard: Option<WlKeyboard>,
+    /// Loaded xkbcommon state. `None` until the compositor sends the
+    /// initial `wl_keyboard.keymap` event.
+    pub(crate) xkb: Option<XkbState>,
+    /// Surface that currently has keyboard focus. `None` between
+    /// enter/leave pairs.
+    pub(crate) focused_surface: Option<SurfaceId>,
+    /// Cached modifier state — updated on `wl_keyboard.modifiers`,
+    /// surfaced on every `KeyEvent` + `PointerButton`.
+    pub(crate) modifiers: Modifiers,
+}
+
+/// xkbcommon `Context` + `Keymap` + `State`, bundled. Constructed
+/// from the `wl_keyboard.keymap` event.
+pub(crate) struct XkbState {
+    pub(crate) _context: xkbcommon::xkb::Context,
+    pub(crate) keymap: xkbcommon::xkb::Keymap,
+    pub(crate) state: xkbcommon::xkb::State,
+}
+
 /// Per-pointer focus + accumulator state. v0.1 supports a single seat
 /// pointer; multi-seat / multi-pointer is post-MVP.
 #[derive(Default)]
@@ -172,6 +200,9 @@ pub(crate) struct State {
 
     /// Pointer state.
     pub(crate) pointer: PointerState,
+
+    /// Keyboard state.
+    pub(crate) keyboard: KeyboardState,
 
     /// Monotonic `SurfaceId` counter. Wraps at u64::MAX (effectively
     /// never).
@@ -384,15 +415,192 @@ impl Dispatch<WlSeat, ()> for State {
         if let WlSeatEvent::Capabilities {
             capabilities: WEnum::Value(caps),
         } = event
-            && caps.contains(Capability::Pointer)
-            && state.pointer.wl_pointer.is_none()
         {
-            // Spawn a wl_pointer child of this seat. v0.1 supports
-            // one pointer per loop.
-            state.pointer.wl_pointer = Some(seat.get_pointer(qh, ()));
+            if caps.contains(Capability::Pointer) && state.pointer.wl_pointer.is_none() {
+                state.pointer.wl_pointer = Some(seat.get_pointer(qh, ()));
+            }
+            if caps.contains(Capability::Keyboard) && state.keyboard.wl_keyboard.is_none() {
+                state.keyboard.wl_keyboard = Some(seat.get_keyboard(qh, ()));
+            }
+            // Capability::Touch handled in #16.
         }
-        // Capability::Keyboard handled in #10.
-        // Capability::Touch handled in #16.
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(
+        state: &mut Self,
+        _keyboard: &WlKeyboard,
+        event: <WlKeyboard as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            WlKeyboardEvent::Keymap { format, fd, size } => {
+                if !matches!(format, WEnum::Value(KeymapFormat::XkbV1)) {
+                    warn!(?format, "ignoring non-xkb keymap format");
+                    return;
+                }
+                // SAFETY: mmap from the fd the compositor handed us;
+                // size + format are protocol-controlled and validated
+                // above. We immediately copy into a Rust-owned String
+                // and release the mapping when xkbcommon is done.
+                let keymap_text = match unsafe {
+                    use std::os::fd::AsRawFd;
+                    let map = libc::mmap(
+                        std::ptr::null_mut(),
+                        size as usize,
+                        libc::PROT_READ,
+                        libc::MAP_PRIVATE,
+                        fd.as_raw_fd(),
+                        0,
+                    );
+                    if map == libc::MAP_FAILED {
+                        None
+                    } else {
+                        let slice = std::slice::from_raw_parts(
+                            map as *const u8,
+                            size as usize - 1, // strip trailing NUL
+                        );
+                        let s = std::str::from_utf8(slice).ok().map(str::to_owned);
+                        libc::munmap(map, size as usize);
+                        s
+                    }
+                } {
+                    Some(text) => text,
+                    None => {
+                        warn!("failed to mmap keymap fd");
+                        return;
+                    }
+                };
+
+                let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
+                let keymap = match xkbcommon::xkb::Keymap::new_from_string(
+                    &context,
+                    keymap_text,
+                    xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1,
+                    xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
+                ) {
+                    Some(km) => km,
+                    None => {
+                        warn!("xkbcommon failed to parse keymap");
+                        return;
+                    }
+                };
+                let xkb_state = xkbcommon::xkb::State::new(&keymap);
+                state.keyboard.xkb = Some(XkbState {
+                    _context: context,
+                    keymap,
+                    state: xkb_state,
+                });
+                debug!("xkb keymap loaded");
+            }
+            WlKeyboardEvent::Enter { surface, .. } => {
+                if let Some(&id) = state.surface_id_by_wl.get(&surface) {
+                    state.keyboard.focused_surface = Some(id);
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: id,
+                        event: WindowEvent::Focused,
+                    });
+                }
+            }
+            WlKeyboardEvent::Leave { surface, .. } => {
+                if let Some(&id) = state.surface_id_by_wl.get(&surface) {
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: id,
+                        event: WindowEvent::Unfocused,
+                    });
+                }
+                state.keyboard.focused_surface = None;
+            }
+            WlKeyboardEvent::Key {
+                key,
+                state: key_state,
+                ..
+            } => {
+                let surface_id = match state.keyboard.focused_surface {
+                    Some(id) => id,
+                    None => return,
+                };
+                let xkb = match state.keyboard.xkb.as_ref() {
+                    Some(x) => x,
+                    None => return,
+                };
+                // Wayland sends evdev scancodes (post-X11 +8 offset
+                // already applied per protocol; xkbcommon expects
+                // exactly that).
+                let keycode = xkbcommon::xkb::Keycode::new(key + 8);
+                let keysym = xkb.state.key_get_one_sym(keycode);
+                let text = xkb.state.key_get_utf8(keycode);
+                let text_opt = if text.is_empty() { None } else { Some(text) };
+
+                let key_name = xkbcommon::xkb::keysym_get_name(keysym);
+                let key_code = if !key_name.is_empty() {
+                    KeyCode::Named(key_name)
+                } else {
+                    KeyCode::Sym(keysym.raw())
+                };
+                let state_variant = match key_state {
+                    WEnum::Value(WlKeyState::Pressed) => WayrKeyState::Pressed,
+                    WEnum::Value(WlKeyState::Released) => WayrKeyState::Released,
+                    _ => return,
+                };
+                let modifiers = state.keyboard.modifiers;
+                state.pending_events.push(Event::WindowEvent {
+                    surface_id,
+                    event: WindowEvent::Key(KeyEvent {
+                        scancode: ScanCode(key),
+                        key_code,
+                        modifiers,
+                        state: state_variant,
+                        text: text_opt,
+                        repeat: false,
+                    }),
+                });
+            }
+            WlKeyboardEvent::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                if let Some(xkb) = state.keyboard.xkb.as_mut() {
+                    xkb.state
+                        .update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+                    state.keyboard.modifiers = modifiers_from_xkb(&xkb.state, &xkb.keymap);
+                }
+            }
+            WlKeyboardEvent::RepeatInfo { .. } => {
+                // Stored for future key-repeat timer wiring; v0.1
+                // doesn't synthesise repeats yet (timer integration
+                // lands in a Phase 1 follow-up).
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Compute wayr's `Modifiers` from current xkb state. Uses the named
+/// modifier API so layout switches (different `Mod1` mappings on
+/// non-US layouts) still resolve to the right wayr-level flag.
+fn modifiers_from_xkb(state: &xkbcommon::xkb::State, keymap: &xkbcommon::xkb::Keymap) -> Modifiers {
+    use xkbcommon::xkb;
+    let is = |name: &str| -> bool {
+        let idx = keymap.mod_get_index(name);
+        if idx == xkb::MOD_INVALID {
+            return false;
+        }
+        state.mod_index_is_active(idx, xkb::STATE_MODS_EFFECTIVE)
+    };
+    Modifiers {
+        shift: is("Shift"),
+        ctrl: is("Control"),
+        alt: is("Mod1"),
+        logo: is("Mod4"),
+        caps_lock: is("Lock"),
+        num_lock: is("Mod2"),
     }
 }
 
@@ -712,29 +920,19 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                     };
                     tl_state.current_size = Size::new(w, h);
 
-                    // Activated bit drives Focused / Unfocused events.
-                    // The state array is a series of u32s representing
-                    // XdgToplevelStateFlag variants.
-                    let was_activated = tl_state.activated;
-                    let now_activated = states
+                    // Track the activated bit on the toplevel for
+                    // consumer queries via Toplevel::is_focused (when
+                    // we add it), but DON'T emit Focused/Unfocused
+                    // here — that's wl_keyboard.enter/leave's job,
+                    // which is the authoritative keyboard-focus
+                    // source. xdg_toplevel.activated reflects the
+                    // "active window" titlebar highlight, which is
+                    // related but not identical.
+                    tl_state.activated = states
                         .chunks_exact(4)
                         .filter_map(|chunk| chunk.try_into().ok().map(u32::from_ne_bytes))
                         .any(|raw| raw == XdgToplevelStateFlag::Activated as u32);
-                    tl_state.activated = now_activated;
-
-                    drop(tl_state);
-
-                    if now_activated != was_activated {
-                        let evt = if now_activated {
-                            WindowEvent::Focused
-                        } else {
-                            WindowEvent::Unfocused
-                        };
-                        state.pending_events.push(Event::WindowEvent {
-                            surface_id: *surface_id,
-                            event: evt,
-                        });
-                    }
+                    let _ = states;
                     // The Resized event itself is queued by the
                     // matching XdgSurface::Configure handler (which
                     // runs immediately after this one in the same

@@ -51,6 +51,11 @@ calloop = "0.14"
 calloop-wayland-source = "0.4"
 libc = "0.2"
 
+# Keymap + state translation. Wayland sends raw evdev scancodes +
+# the keymap as a mmap'd xkb_keymap file; xkbcommon does the
+# translation to keysyms + UTF-8 text.
+xkbcommon = "0.8"
+
 [dev-dependencies]
 # examples/ smoke tests pull wgpu here once #6 (raw-window-handle)
 # lands. Connection tests use tracing-subscriber for log surfacing.
