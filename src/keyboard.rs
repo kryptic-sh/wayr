@@ -9,9 +9,14 @@ use std::sync::Arc;
 
 /// Physical key code as sent by the compositor over `wl_keyboard.key`.
 ///
-/// The numeric value is the Linux evdev scancode + 8 (per the X11
-/// keycode convention Wayland inherits). `wayr` does not translate
-/// these to character text directly — that's [`KeyEvent::text`].
+/// The numeric value is the raw Linux evdev scancode (e.g.
+/// `KEY_ESC = 1`, `KEY_BACKSPACE = 14`, `KEY_TAB = 15`, `KEY_ENTER = 28`).
+/// wayr adds the +8 X11 offset internally before handing the keycode
+/// to xkbcommon, but the value surfaced to consumers is the evdev
+/// scancode — direct from the wire — so consumers can match against
+/// `linux/input-event-codes.h` constants without a translation step.
+/// `wayr` does not translate these to character text directly —
+/// that's [`KeyEvent::text`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScanCode(pub u32);
 
