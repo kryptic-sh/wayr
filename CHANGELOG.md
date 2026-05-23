@@ -8,6 +8,22 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-23
+
+### Fixed
+
+- `Resized` and `ScaleFactorChanged` are now deduplicated against the
+  last-emitted value. Compositors reconfigure surfaces for many reasons that
+  don't change the size or scale — activated-bit flip on focus change,
+  decoration update, tiled-state shuffle — and unconditionally re-emitting
+  `Resized(new_size)` for every configure ack caused heavy consumers (e.g. CEF
+  host resize-cascade in buffr) to thrash on every Alt-Tab. wayr now tracks
+  `last_emitted_size` + `last_emitted_scale` per surface and only emits the
+  event when the value actually moved. `RedrawRequested` still fires on every
+  configure ack — the compositor expects a fresh frame regardless of size delta.
+
+[0.1.3]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.3
+
 ## [0.1.2] - 2026-05-23
 
 ### Fixed
@@ -41,7 +57,7 @@ and this project adheres to
   queued for a future release; this immediate path is sufficient for the
   consumer that needed it.
 
-[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.3...HEAD
 [0.1.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.1
 
 ## [0.1.0] - 2026-05-23

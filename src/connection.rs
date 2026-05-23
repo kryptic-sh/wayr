@@ -201,6 +201,12 @@ pub(crate) struct LayerSurfaceState {
     /// Effective scale factor — composed from (`fractional_scale_120 /
     /// 120` if present) or `max(touched_outputs.scale)` otherwise.
     pub(crate) scale_factor: f64,
+    /// Size last surfaced via `Resized` (dedupe; see
+    /// [`ToplevelState::last_emitted_size`]).
+    pub(crate) last_emitted_size: Size,
+    /// Scale last surfaced via `ScaleFactorChanged` (dedupe; see
+    /// [`ToplevelState::last_emitted_scale`]).
+    pub(crate) last_emitted_scale: f64,
     /// Consumer called `LayerSurface::request_redraw()` and hasn't been
     /// served yet. See [`ToplevelState::needs_redraw`].
     pub(crate) needs_redraw: bool,
@@ -244,6 +250,17 @@ pub(crate) struct ToplevelState {
     /// Effective scale factor (composed: fractional if available,
     /// otherwise `max(touched_outputs.scale)`).
     pub(crate) scale_factor: f64,
+    /// Size last surfaced to the consumer via a `Resized` event.
+    /// Used to dedupe spurious configures: the compositor reconfigures
+    /// the surface for many reasons that don't change the size
+    /// (activated-bit flip on focus change, decoration update, …),
+    /// and re-emitting `Resized` with an unchanged value causes heavy
+    /// consumers (CEF host resize cascade, wgpu surface.configure)
+    /// to do unnecessary work.
+    pub(crate) last_emitted_size: Size,
+    /// Scale last surfaced to the consumer via `ScaleFactorChanged`.
+    /// Same dedupe rationale as [`Self::last_emitted_size`].
+    pub(crate) last_emitted_scale: f64,
     /// Consumer called `Toplevel::request_redraw()` and hasn't been
     /// served yet. The run loop drains this into a synthetic
     /// `WindowEvent::RedrawRequested` once per iteration (coalescing
@@ -1410,19 +1427,39 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                 if let Some(vp) = &tl_state.viewport {
                     vp.set_destination(new_size.width.max(1) as i32, new_size.height.max(1) as i32);
                 }
+                // Dedupe: compositors reconfigure on focus / activated /
+                // tiled-state / decoration changes — events with no
+                // size or scale delta. Only emit Resized /
+                // ScaleFactorChanged when the value actually moved.
+                let emit_resized = new_size != tl_state.last_emitted_size;
+                let emit_scale =
+                    (scale - tl_state.last_emitted_scale).abs() > f64::EPSILON;
+                if emit_resized {
+                    tl_state.last_emitted_size = new_size;
+                }
+                if emit_scale {
+                    tl_state.last_emitted_scale = scale;
+                }
                 drop(tl_state);
 
-                state.pending_events.push(Event::WindowEvent {
-                    surface_id: *surface_id,
-                    event: WindowEvent::Resized(new_size),
-                });
-                state.pending_events.push(Event::WindowEvent {
-                    surface_id: *surface_id,
-                    event: WindowEvent::ScaleFactorChanged {
-                        new_scale_factor: scale,
-                        suggested_size: new_size,
-                    },
-                });
+                if emit_resized {
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: *surface_id,
+                        event: WindowEvent::Resized(new_size),
+                    });
+                }
+                if emit_scale {
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: *surface_id,
+                        event: WindowEvent::ScaleFactorChanged {
+                            new_scale_factor: scale,
+                            suggested_size: new_size,
+                        },
+                    });
+                }
+                // RedrawRequested always fires — every configure ack
+                // expects a fresh frame attached on the matching
+                // commit, regardless of size/scale movement.
                 state.pending_events.push(Event::WindowEvent {
                     surface_id: *surface_id,
                     event: WindowEvent::RedrawRequested,
@@ -1686,21 +1723,36 @@ impl
                             new_size.height.max(1) as i32,
                         );
                     }
+                    // Dedupe (see XdgSurface::Configure handler for the
+                    // rationale — same applies to layer-shell).
+                    let emit_resized = new_size != ls_state.last_emitted_size;
+                    let emit_scale =
+                        (scale - ls_state.last_emitted_scale).abs() > f64::EPSILON;
+                    if emit_resized {
+                        ls_state.last_emitted_size = new_size;
+                    }
+                    if emit_scale {
+                        ls_state.last_emitted_scale = scale;
+                    }
                     drop(ls_state);
 
                     layer_surface.ack_configure(serial);
 
-                    state.pending_events.push(Event::WindowEvent {
-                        surface_id: *surface_id,
-                        event: WindowEvent::Resized(new_size),
-                    });
-                    state.pending_events.push(Event::WindowEvent {
-                        surface_id: *surface_id,
-                        event: WindowEvent::ScaleFactorChanged {
-                            new_scale_factor: scale,
-                            suggested_size: new_size,
-                        },
-                    });
+                    if emit_resized {
+                        state.pending_events.push(Event::WindowEvent {
+                            surface_id: *surface_id,
+                            event: WindowEvent::Resized(new_size),
+                        });
+                    }
+                    if emit_scale {
+                        state.pending_events.push(Event::WindowEvent {
+                            surface_id: *surface_id,
+                            event: WindowEvent::ScaleFactorChanged {
+                                new_scale_factor: scale,
+                                suggested_size: new_size,
+                            },
+                        });
+                    }
                     state.pending_events.push(Event::WindowEvent {
                         surface_id: *surface_id,
                         event: WindowEvent::RedrawRequested,

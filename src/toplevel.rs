@@ -354,6 +354,8 @@ impl ToplevelBuilder {
             closed: false,
             activated: false,
             scale_factor: 1.0,
+            last_emitted_size: Size::default(),
+            last_emitted_scale: 0.0,
             needs_redraw: false,
             fractional_scale_120: None,
             touched_outputs: Default::default(),
