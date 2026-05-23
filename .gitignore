@@ -1,0 +1,22 @@
+# Rust build artefacts
+/target
+**/*.rs.bk
+
+# Lockfile is tracked for binary crates and library examples; wayr ships
+# as a library, but consumers vendor it via git so a tracked lockfile
+# gives bisectable CI. Keep it.
+# /Cargo.lock  — intentionally not ignored
+
+# Editor / IDE noise
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Direnv
+.envrc
+.direnv/
+
+# Local-only Claude transcripts / notes
+.claude/

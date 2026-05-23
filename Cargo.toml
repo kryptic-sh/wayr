@@ -1,0 +1,36 @@
+[package]
+name = "wayr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/kryptic-sh/wayr"
+homepage = "https://kryptic.sh"
+authors = ["mxaddict <mxaddict@kryptic.sh>"]
+description = "Wayland-first windowing toolkit for Rust. Used by buffr, pikr, and future kryptic-sh GUI apps."
+keywords = ["wayland", "windowing", "gui"]
+categories = ["gui", "os::linux-apis"]
+
+[features]
+# Default keeps the toplevel + pointer + keyboard happy path. Every
+# protocol module beyond the core is opt-in so consumers compile only
+# what they need — pikr enables `layer-shell`, buffr enables
+# `subsurface + text-input + clipboard + cursor-shape + fractional-scale`.
+default = []
+layer-shell = []
+subsurface = []
+text-input = []
+clipboard = []
+cursor-shape = []
+fractional-scale = []
+
+[dependencies]
+# Stays minimal until #4 (connection + registry) lands and pulls in
+# wayland-client + wayland-protocols + calloop + xkbcommon.
+
+[dev-dependencies]
+# examples/ smoke tests will pull wgpu here once #6 (raw-window-handle)
+# lands. Empty for now so scaffold builds cleanly.
+
+# Examples land per-phase. `toplevel` arrives with #9; `layer-shell`
+# with #11; `subsurface` with #12; `ime` with #15; `clipboard` with #14.
