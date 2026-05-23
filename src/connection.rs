@@ -12,7 +12,7 @@
 //! without inheriting sctk's design assumptions.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use tracing::{debug, warn};
@@ -21,7 +21,7 @@ use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_keyboard::{
     Event as WlKeyboardEvent, KeyState as WlKeyState, KeymapFormat, WlKeyboard,
 };
-use wayland_client::protocol::wl_output::WlOutput;
+use wayland_client::protocol::wl_output::{Event as WlOutputEvent, Subpixel, Transform, WlOutput};
 use wayland_client::protocol::wl_pointer::{
     self, ButtonState as WlButtonState, Event as WlPointerEvent, WlPointer,
 };
@@ -43,6 +43,7 @@ use crate::error::{Error, Result};
 use crate::event::{Event, WindowEvent};
 use crate::geometry::{Position, Size};
 use crate::keyboard::{KeyCode, KeyEvent, KeyState as WayrKeyState, Modifiers, ScanCode};
+use crate::output::{OutputId, OutputInfo};
 use crate::pointer::{
     AxisDirection, AxisSource, PointerButton, PointerButtonState, PointerPosition, ScrollEvent,
 };
@@ -62,6 +63,17 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1;
 #[cfg(feature = "cursor-shape")]
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
+
+#[cfg(feature = "fractional-scale")]
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+#[cfg(feature = "fractional-scale")]
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::{
+    Event as WpFractionalScaleEvent, WpFractionalScaleV1,
+};
+#[cfg(feature = "fractional-scale")]
+use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
+#[cfg(feature = "fractional-scale")]
+use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
 /// Owning handle for the live Wayland connection + bound globals.
 ///
@@ -109,8 +121,9 @@ pub(crate) struct Globals {
     /// `xdg_wm_base` — top-level windows. Always required (pings).
     pub(crate) xdg_wm_base: XdgWmBase,
 
-    /// All `wl_output`s the compositor advertised. Multi-output state
-    /// tracking lands in #13; v0.1 just keeps the bound proxies.
+    /// All `wl_output`s the compositor advertised. Per-output state
+    /// (scale, geometry, mode, name) is mirrored into [`State::outputs`]
+    /// by the dispatch handler; this Vec just keeps the proxies alive.
     pub(crate) outputs: Vec<WlOutput>,
 
     /// `zwlr_layer_shell_v1` — only when the `layer-shell` feature is
@@ -130,6 +143,48 @@ pub(crate) struct Globals {
     /// LayerSurface fall back to a no-op set_cursor when missing.
     #[cfg(feature = "cursor-shape")]
     pub(crate) cursor_shape_manager: Option<WpCursorShapeManagerV1>,
+
+    /// `wp_fractional_scale_manager_v1` + `wp_viewporter` — `None` when
+    /// the `fractional-scale` feature is off or the compositor lacks
+    /// the manager. Per-surface objects are spawned at build time.
+    #[cfg(feature = "fractional-scale")]
+    pub(crate) fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
+    /// `wp_viewporter` — bound alongside fractional-scale, used to
+    /// `set_destination` the surface to logical pixels while the
+    /// consumer renders at physical resolution.
+    #[cfg(feature = "fractional-scale")]
+    pub(crate) viewporter: Option<WpViewporter>,
+}
+
+/// Per-output mirrored state. Populated from the wl_output dispatch
+/// handler so callers (and the per-surface scale resolver) can read
+/// it without driving wayland round-trips themselves.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct OutputState {
+    pub(crate) id: OutputId,
+    pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) scale: i32,
+    pub(crate) physical_size: Size,
+    pub(crate) position: (i32, i32),
+    /// Pending state staged via `wl_output.geometry` / `.mode` / `.scale`
+    /// is only applied on `done` (per the protocol's atomic-set
+    /// guarantee). We mirror straight into the live fields above and
+    /// expose `OutputInfo` snapshots on each `done`.
+    pub(crate) ready: bool,
+}
+
+impl OutputState {
+    pub(crate) fn snapshot(&self) -> OutputInfo {
+        OutputInfo {
+            id: self.id,
+            name: self.name.clone(),
+            description: self.description.clone(),
+            scale: self.scale.max(1),
+            physical_size: self.physical_size,
+            position: self.position,
+        }
+    }
 }
 
 /// Per-layer-surface state, parallel to [`ToplevelState`]. Shared
@@ -143,10 +198,23 @@ pub(crate) struct LayerSurfaceState {
     /// Preferred size from the builder. Used when the compositor's
     /// configure returns `0` on an axis ("you pick").
     pub(crate) preferred_size: Size,
-    /// Effective scale factor — defaults to 1.0; wired in #13.
+    /// Effective scale factor — composed from (`fractional_scale_120 /
+    /// 120` if present) or `max(touched_outputs.scale)` otherwise.
     pub(crate) scale_factor: f64,
+    /// Last `preferred_scale` from `wp_fractional_scale_v1` (in 1/120
+    /// units). `None` until the compositor sends one OR the
+    /// `fractional-scale` feature is off.
+    pub(crate) fractional_scale_120: Option<u32>,
+    /// Outputs this surface currently overlaps (driven by
+    /// `wl_surface.enter` / `.leave`). Empty until the compositor
+    /// reports the first `enter`.
+    pub(crate) touched_outputs: HashSet<OutputId>,
     /// Closed by compositor.
     pub(crate) closed: bool,
+    /// Clone of the surface's `wp_viewport` proxy. See
+    /// [`ToplevelState::viewport`].
+    #[cfg(feature = "fractional-scale")]
+    pub(crate) viewport: Option<wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport>,
 }
 
 /// Per-toplevel state mutated by dispatch handlers and observed by
@@ -170,9 +238,23 @@ pub(crate) struct ToplevelState {
     /// last configure. v0.1 only surfaces `Focused` / `Unfocused`
     /// (activated bit).
     pub(crate) activated: bool,
-    /// Effective scale factor (composed output scale ×
-    /// fractional-scale). Defaults to 1.0; wired in #13.
+    /// Effective scale factor (composed: fractional if available,
+    /// otherwise `max(touched_outputs.scale)`).
     pub(crate) scale_factor: f64,
+    /// Last `preferred_scale` from `wp_fractional_scale_v1` (in 1/120
+    /// units). `None` until the compositor sends one.
+    pub(crate) fractional_scale_120: Option<u32>,
+    /// Outputs this surface currently overlaps (driven by
+    /// `wl_surface.enter` / `.leave`). Keys are `OutputId.0` for cheap
+    /// copyable lookups; the per-output state lives in [`State::outputs`].
+    pub(crate) touched_outputs: HashSet<OutputId>,
+    /// Clone of the surface's `wp_viewport` proxy. Held in state so
+    /// the configure dispatch handler can auto-apply
+    /// `set_destination(logical_w, logical_h)` whenever the size
+    /// changes — keeping the consumer's rendered (physical-sized)
+    /// buffer correctly downscaled to the logical surface bounds.
+    #[cfg(feature = "fractional-scale")]
+    pub(crate) viewport: Option<wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport>,
 }
 
 /// Per-seat text-input state. v0.1 supports a single seat.
@@ -326,6 +408,16 @@ pub(crate) struct State {
     /// never).
     pub(crate) next_surface_id: u64,
 
+    /// Monotonic `OutputId` counter. Allocated lazily when an
+    /// `OutputState` entry is first inserted.
+    pub(crate) next_output_id: u64,
+
+    /// Per-output state, keyed by the bound `wl_output` proxy.
+    /// Populated by the wl_output dispatch handler (the registry
+    /// roundtrip in `connect_to_env` binds the proxies but the
+    /// geometry/mode/scale/name events arrive asynchronously).
+    pub(crate) outputs: HashMap<WlOutput, OutputState>,
+
     /// Set by `EventLoop::exit`. Drives the run loop to bail.
     pub(crate) exit_requested: bool,
 }
@@ -336,6 +428,50 @@ impl State {
         self.next_surface_id = self.next_surface_id.wrapping_add(1);
         SurfaceId::from_raw(self.next_surface_id)
             .expect("next_surface_id never zero after wrapping_add")
+    }
+
+    /// Allocate a fresh `OutputId`.
+    pub(crate) fn alloc_output_id(&mut self) -> OutputId {
+        self.next_output_id = self.next_output_id.wrapping_add(1);
+        OutputId(self.next_output_id)
+    }
+
+    /// Recompute the effective scale_factor for a toplevel using the
+    /// composition rule (fractional if set, otherwise the max integer
+    /// scale of touched outputs, defaulting to 1.0). Returns the new
+    /// value so the caller can decide whether to emit
+    /// `ScaleFactorChanged`.
+    pub(crate) fn resolved_scale_for_toplevel(&self, st: &ToplevelState) -> f64 {
+        if let Some(s120) = st.fractional_scale_120 {
+            return s120 as f64 / 120.0;
+        }
+        st.touched_outputs
+            .iter()
+            .filter_map(|oid| {
+                self.outputs
+                    .values()
+                    .find(|o| o.id == *oid)
+                    .map(|o| o.scale.max(1))
+            })
+            .max()
+            .unwrap_or(1) as f64
+    }
+
+    #[cfg(feature = "layer-shell")]
+    pub(crate) fn resolved_scale_for_layer(&self, st: &LayerSurfaceState) -> f64 {
+        if let Some(s120) = st.fractional_scale_120 {
+            return s120 as f64 / 120.0;
+        }
+        st.touched_outputs
+            .iter()
+            .filter_map(|oid| {
+                self.outputs
+                    .values()
+                    .find(|o| o.id == *oid)
+                    .map(|o| o.scale.max(1))
+            })
+            .max()
+            .unwrap_or(1) as f64
     }
 }
 
@@ -404,6 +540,12 @@ impl Connection {
         let cursor_shape_manager: Option<WpCursorShapeManagerV1> =
             bind_optional(&global_list, &qh, "wp_cursor_shape_manager_v1", 2);
 
+        #[cfg(feature = "fractional-scale")]
+        let fractional_scale_manager: Option<WpFractionalScaleManagerV1> =
+            bind_optional(&global_list, &qh, "wp_fractional_scale_manager_v1", 1);
+        #[cfg(feature = "fractional-scale")]
+        let viewporter: Option<WpViewporter> = bind_optional(&global_list, &qh, "wp_viewporter", 1);
+
         Ok(Connection {
             wl,
             queue,
@@ -420,6 +562,10 @@ impl Connection {
                 text_input_manager,
                 #[cfg(feature = "cursor-shape")]
                 cursor_shape_manager,
+                #[cfg(feature = "fractional-scale")]
+                fractional_scale_manager,
+                #[cfg(feature = "fractional-scale")]
+                viewporter,
             },
         })
     }
@@ -969,15 +1115,118 @@ fn evdev_to_pointer_button(code: u32) -> PointerButton {
 
 impl Dispatch<WlOutput, ()> for State {
     fn event(
-        _: &mut Self,
-        _: &WlOutput,
-        _: <WlOutput as wayland_client::Proxy>::Event,
+        state: &mut Self,
+        proxy: &WlOutput,
+        event: <WlOutput as wayland_client::Proxy>::Event,
         _: &(),
         _: &WlConnection,
         _: &QueueHandle<Self>,
     ) {
-        // Geometry / mode / scale / name / description events.
-        // Multi-output tracking lands in #13.
+        // Lazy-allocate an `OutputState` on first event from a given
+        // wl_output. Allocates the OutputId once per output for the
+        // lifetime of the EventLoop.
+        let new_id = if !state.outputs.contains_key(proxy) {
+            Some(state.alloc_output_id())
+        } else {
+            None
+        };
+        let entry = state.outputs.entry(proxy.clone()).or_default();
+        if let Some(id) = new_id {
+            entry.id = id;
+            entry.scale = 1; // wl_output defaults to 1 until scale arrives.
+        }
+        match event {
+            WlOutputEvent::Geometry { x, y, .. } => {
+                entry.position = (x, y);
+                entry.ready = false;
+            }
+            WlOutputEvent::Mode { width, height, .. } => {
+                entry.physical_size = Size::new(width.max(0) as u32, height.max(0) as u32);
+                entry.ready = false;
+            }
+            WlOutputEvent::Scale { factor } => {
+                entry.scale = factor.max(1);
+                entry.ready = false;
+            }
+            WlOutputEvent::Name { name } => {
+                entry.name = Some(name);
+                entry.ready = false;
+            }
+            WlOutputEvent::Description { description } => {
+                entry.description = Some(description);
+                entry.ready = false;
+            }
+            WlOutputEvent::Done => {
+                entry.ready = true;
+                // Recompute scale for any surface whose touched_outputs
+                // includes this one. Cheap O(N_surfaces) — pre-MVP
+                // workloads have <10 surfaces.
+                let oid = entry.id;
+                recompute_scale_for_outputs(state, oid);
+            }
+            // wl_output v2+ has no other events we care about.
+            _ => {}
+        }
+        // Subpixel + Transform fields exist purely to silence unused
+        // imports; they're available to consumers via OutputInfo if we
+        // expand the public surface later.
+        let _ = (Subpixel::None, Transform::Normal);
+    }
+}
+
+/// Recompute `scale_factor` for every surface whose `touched_outputs`
+/// includes `oid`, emit `ScaleFactorChanged` events when the value
+/// actually changed. Called from `wl_output.done` and from the
+/// `wl_surface.enter` / `.leave` paths.
+fn recompute_scale_for_outputs(state: &mut State, oid: OutputId) {
+    let toplevel_ids: Vec<SurfaceId> = state
+        .toplevels
+        .iter()
+        .filter(|(_, st)| st.borrow().touched_outputs.contains(&oid))
+        .map(|(id, _)| *id)
+        .collect();
+    for sid in toplevel_ids {
+        let st_rc = state.toplevels[&sid].clone();
+        let new_scale = state.resolved_scale_for_toplevel(&st_rc.borrow());
+        let mut st = st_rc.borrow_mut();
+        if (st.scale_factor - new_scale).abs() > f64::EPSILON {
+            st.scale_factor = new_scale;
+            let sz = st.current_size;
+            drop(st);
+            state.pending_events.push(Event::WindowEvent {
+                surface_id: sid,
+                event: WindowEvent::ScaleFactorChanged {
+                    new_scale_factor: new_scale,
+                    suggested_size: sz,
+                },
+            });
+        }
+    }
+    #[cfg(feature = "layer-shell")]
+    {
+        let ls_ids: Vec<SurfaceId> = state
+            .layer_surfaces
+            .iter()
+            .filter(|(_, st)| st.borrow().touched_outputs.contains(&oid))
+            .map(|(id, _)| *id)
+            .collect();
+        for sid in ls_ids {
+            let st_rc = state.layer_surfaces[&sid].clone();
+            let new_scale = state.resolved_scale_for_layer(&st_rc.borrow());
+            let mut st = st_rc.borrow_mut();
+            if (st.scale_factor - new_scale).abs() > f64::EPSILON {
+                st.scale_factor = new_scale;
+                let sz = st.current_size;
+                drop(st);
+                state.pending_events.push(Event::WindowEvent {
+                    surface_id: sid,
+                    event: WindowEvent::ScaleFactorChanged {
+                        new_scale_factor: new_scale,
+                        suggested_size: sz,
+                    },
+                });
+            }
+        }
     }
 }
 
@@ -1001,16 +1250,109 @@ impl Dispatch<XdgWmBase, ()> for State {
 
 impl Dispatch<WlSurface, SurfaceId> for State {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _surface: &WlSurface,
-        _event: <WlSurface as wayland_client::Proxy>::Event,
-        _surface_id: &SurfaceId,
+        event: <WlSurface as wayland_client::Proxy>::Event,
+        surface_id: &SurfaceId,
         _: &WlConnection,
         _: &QueueHandle<Self>,
     ) {
-        // wl_surface.enter / leave fire when the surface intersects an
-        // output. Multi-output scale tracking lands in #13; for v0.1
-        // we drop these events.
+        use wayland_client::protocol::wl_surface::Event as WlSurfaceEvent;
+        match event {
+            WlSurfaceEvent::Enter { output } => {
+                // Look up the OutputId for the WlOutput proxy.
+                let oid = match state.outputs.get(&output).map(|o| o.id) {
+                    Some(id) => id,
+                    None => {
+                        // wl_output hasn't reported any events yet —
+                        // lazy-allocate one now so the surface can
+                        // track the membership.
+                        let id = state.alloc_output_id();
+                        let st = OutputState {
+                            id,
+                            scale: 1,
+                            ..OutputState::default()
+                        };
+                        state.outputs.insert(output.clone(), st);
+                        id
+                    }
+                };
+                update_touched_outputs(state, *surface_id, oid, true);
+            }
+            WlSurfaceEvent::Leave { output } => {
+                if let Some(oid) = state.outputs.get(&output).map(|o| o.id) {
+                    update_touched_outputs(state, *surface_id, oid, false);
+                }
+            }
+            WlSurfaceEvent::PreferredBufferScale { factor: _ } => {
+                // wl_surface.preferred_buffer_scale (v6) — superseded
+                // by wp_fractional_scale_v1 when the manager is
+                // present. v0.1 ignores; integer-only consumers rely on
+                // the `Enter`/`Leave` path's max-output-scale rule.
+            }
+            // PreferredBufferTransform — rotation hint, not relevant
+            // until we wire wl_surface.set_buffer_transform.
+            _ => {}
+        }
+    }
+}
+
+/// Add or remove `oid` from a surface's `touched_outputs` set + emit
+/// `ScaleFactorChanged` if the resolved scale changed.
+fn update_touched_outputs(state: &mut State, surface_id: SurfaceId, oid: OutputId, enter: bool) {
+    if let Some(st_rc) = state.toplevels.get(&surface_id).cloned() {
+        {
+            let mut st = st_rc.borrow_mut();
+            if enter {
+                st.touched_outputs.insert(oid);
+            } else {
+                st.touched_outputs.remove(&oid);
+            }
+        }
+        let new_scale = state.resolved_scale_for_toplevel(&st_rc.borrow());
+        let mut st = st_rc.borrow_mut();
+        if (st.scale_factor - new_scale).abs() > f64::EPSILON {
+            st.scale_factor = new_scale;
+            let sz = st.current_size;
+            drop(st);
+            state.pending_events.push(Event::WindowEvent {
+                surface_id,
+                event: WindowEvent::ScaleFactorChanged {
+                    new_scale_factor: new_scale,
+                    suggested_size: sz,
+                },
+            });
+        }
+        return;
+    }
+    #[cfg(not(feature = "layer-shell"))]
+    {
+        let _ = (state, oid, enter);
+    }
+    #[cfg(feature = "layer-shell")]
+    if let Some(st_rc) = state.layer_surfaces.get(&surface_id).cloned() {
+        {
+            let mut st = st_rc.borrow_mut();
+            if enter {
+                st.touched_outputs.insert(oid);
+            } else {
+                st.touched_outputs.remove(&oid);
+            }
+        }
+        let new_scale = state.resolved_scale_for_layer(&st_rc.borrow());
+        let mut st = st_rc.borrow_mut();
+        if (st.scale_factor - new_scale).abs() > f64::EPSILON {
+            st.scale_factor = new_scale;
+            let sz = st.current_size;
+            drop(st);
+            state.pending_events.push(Event::WindowEvent {
+                surface_id,
+                event: WindowEvent::ScaleFactorChanged {
+                    new_scale_factor: new_scale,
+                    suggested_size: sz,
+                },
+            });
+        }
     }
 }
 
@@ -1038,6 +1380,10 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
 
                 let new_size = tl_state.current_size;
                 let scale = tl_state.scale_factor;
+                #[cfg(feature = "fractional-scale")]
+                if let Some(vp) = &tl_state.viewport {
+                    vp.set_destination(new_size.width.max(1) as i32, new_size.height.max(1) as i32);
+                }
                 drop(tl_state);
 
                 state.pending_events.push(Event::WindowEvent {
@@ -1307,6 +1653,13 @@ impl
                     ls_state.current_size = Size::new(w, h);
                     let new_size = ls_state.current_size;
                     let scale = ls_state.scale_factor;
+                    #[cfg(feature = "fractional-scale")]
+                    if let Some(vp) = &ls_state.viewport {
+                        vp.set_destination(
+                            new_size.width.max(1) as i32,
+                            new_size.height.max(1) as i32,
+                        );
+                    }
                     drop(ls_state);
 
                     layer_surface.ack_configure(serial);
@@ -1427,6 +1780,100 @@ impl Dispatch<WlTouch, ()> for State {
             // individually and ignores the rest.
             _ => {}
         }
+    }
+}
+
+#[cfg(feature = "fractional-scale")]
+impl Dispatch<WpFractionalScaleManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpFractionalScaleManagerV1,
+        _: <WpFractionalScaleManagerV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        // No events on the manager.
+    }
+}
+
+#[cfg(feature = "fractional-scale")]
+impl Dispatch<WpFractionalScaleV1, SurfaceId> for State {
+    fn event(
+        state: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: <WpFractionalScaleV1 as wayland_client::Proxy>::Event,
+        surface_id: &SurfaceId,
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let WpFractionalScaleEvent::PreferredScale { scale } = event {
+            // scale is in units of 1/120. Store the integer; resolve
+            // to f64 on every recompute so we keep the wire fidelity.
+            let new_scale = scale as f64 / 120.0;
+            if let Some(st_rc) = state.toplevels.get(surface_id).cloned() {
+                let mut st = st_rc.borrow_mut();
+                st.fractional_scale_120 = Some(scale);
+                if (st.scale_factor - new_scale).abs() > f64::EPSILON {
+                    st.scale_factor = new_scale;
+                    let sz = st.current_size;
+                    drop(st);
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: *surface_id,
+                        event: WindowEvent::ScaleFactorChanged {
+                            new_scale_factor: new_scale,
+                            suggested_size: sz,
+                        },
+                    });
+                }
+                return;
+            }
+            #[cfg(feature = "layer-shell")]
+            if let Some(st_rc) = state.layer_surfaces.get(surface_id).cloned() {
+                let mut st = st_rc.borrow_mut();
+                st.fractional_scale_120 = Some(scale);
+                if (st.scale_factor - new_scale).abs() > f64::EPSILON {
+                    st.scale_factor = new_scale;
+                    let sz = st.current_size;
+                    drop(st);
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: *surface_id,
+                        event: WindowEvent::ScaleFactorChanged {
+                            new_scale_factor: new_scale,
+                            suggested_size: sz,
+                        },
+                    });
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "fractional-scale")]
+impl Dispatch<WpViewporter, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpViewporter,
+        _: <WpViewporter as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        // No events.
+    }
+}
+
+#[cfg(feature = "fractional-scale")]
+impl Dispatch<WpViewport, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpViewport,
+        _: <WpViewport as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        // No events.
     }
 }
 

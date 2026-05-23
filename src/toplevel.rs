@@ -25,6 +25,19 @@ pub struct Toplevel {
     pub(crate) xdg_surface: XdgSurface,
     pub(crate) xdg_toplevel: XdgToplevel,
     pub(crate) state: Rc<RefCell<ToplevelState>>,
+    /// Per-surface `wp_fractional_scale_v1` listener — present only
+    /// when the `fractional-scale` feature is on and the compositor
+    /// advertises the manager. Destroyed in `Drop`.
+    #[cfg(feature = "fractional-scale")]
+    pub(crate) fractional_scale: Option<
+        wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1,
+    >,
+    /// Per-surface `wp_viewport`. Apps that render at fractional scale
+    /// drive `set_destination(logical_w, logical_h)` so the compositor
+    /// reverse-scales their physical-pixel buffer back to surface
+    /// coordinates. Created alongside the fractional-scale listener.
+    #[cfg(feature = "fractional-scale")]
+    pub(crate) viewport: Option<wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport>,
 }
 
 impl Toplevel {
@@ -77,6 +90,35 @@ impl Toplevel {
         std::ptr::NonNull::new(id.as_ptr().cast::<std::ffi::c_void>())
     }
 
+    /// Physical buffer size the consumer should render at to match
+    /// the surface's current logical size given the active scale
+    /// factor. Equivalent to `size() * scale_factor()` rounded up.
+    ///
+    /// Use this for sizing wgpu / vulkano swapchains: render at
+    /// physical resolution, then let the compositor reverse-scale via
+    /// the attached `wp_viewport` to the logical surface size.
+    pub fn physical_size(&self) -> Size {
+        let st = self.state.borrow();
+        let s = st.scale_factor.max(1.0);
+        Size::new(
+            (st.current_size.width as f64 * s).ceil() as u32,
+            (st.current_size.height as f64 * s).ceil() as u32,
+        )
+    }
+
+    /// Set the `wp_viewport` destination, telling the compositor to
+    /// treat the attached buffer (rendered at physical resolution) as
+    /// covering `size` logical pixels. Auto-applied on configure ack
+    /// when the `fractional-scale` feature is on; consumers using
+    /// custom render pipelines (e.g. WPE WebKit subsurface embedders)
+    /// can call this directly with their preferred logical size.
+    #[cfg(feature = "fractional-scale")]
+    pub fn set_viewport_destination(&self, size: Size) {
+        if let Some(vp) = &self.viewport {
+            vp.set_destination(size.width.max(1) as i32, size.height.max(1) as i32);
+        }
+    }
+
     /// Set the cursor shape shown when the pointer is over this
     /// surface. Sticky until the next call.
     ///
@@ -113,11 +155,20 @@ impl Toplevel {
 
 impl Drop for Toplevel {
     fn drop(&mut self) {
-        // Order matters: destroy xdg_toplevel → xdg_surface →
-        // wl_surface (reverse of construction). Wayland-client
-        // destroys the proxy when it goes out of scope, but
-        // xdg_toplevel + xdg_surface have explicit `destroy`
-        // requests that must be sent first.
+        // Order matters: destroy the wp_* extension objects first, then
+        // xdg_toplevel → xdg_surface → wl_surface (reverse of
+        // construction). Wayland-client destroys the proxy when it
+        // goes out of scope, but each layer above has an explicit
+        // `destroy` request that must be sent first.
+        #[cfg(feature = "fractional-scale")]
+        {
+            if let Some(fs) = self.fractional_scale.take() {
+                fs.destroy();
+            }
+            if let Some(vp) = self.viewport.take() {
+                vp.destroy();
+            }
+        }
         self.xdg_toplevel.destroy();
         self.xdg_surface.destroy();
         self.wl_surface.destroy();
@@ -276,6 +327,20 @@ impl ToplevelBuilder {
             xdg_toplevel.set_max_size(max.width as i32, max.height as i32);
         }
 
+        // Attach fractional-scale + viewport extensions if available.
+        #[cfg(feature = "fractional-scale")]
+        let fractional_scale = event_loop
+            .connection_globals()
+            .fractional_scale_manager
+            .as_ref()
+            .map(|m| m.get_fractional_scale(&wl_surface, &qh, surface_id));
+        #[cfg(feature = "fractional-scale")]
+        let viewport = event_loop
+            .connection_globals()
+            .viewporter
+            .as_ref()
+            .map(|v| v.get_viewport(&wl_surface, &qh, ()));
+
         // Register state map entry before the first commit so the
         // configure dispatch can find it.
         let state = Rc::new(RefCell::new(ToplevelState {
@@ -285,6 +350,10 @@ impl ToplevelBuilder {
             closed: false,
             activated: false,
             scale_factor: 1.0,
+            fractional_scale_120: None,
+            touched_outputs: Default::default(),
+            #[cfg(feature = "fractional-scale")]
+            viewport: viewport.clone(),
         }));
         event_loop
             .state
@@ -304,6 +373,10 @@ impl ToplevelBuilder {
             xdg_surface,
             xdg_toplevel,
             state,
+            #[cfg(feature = "fractional-scale")]
+            fractional_scale,
+            #[cfg(feature = "fractional-scale")]
+            viewport,
         })
     }
 }

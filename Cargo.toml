@@ -32,6 +32,11 @@ text-input = ["wayland-protocols/unstable"]
 # shm theme loading). Pulls `wayland-protocols/unstable` because the
 # cursor-shape staging protocol depends on `tablet/zv2`.
 cursor-shape = ["wayland-protocols/unstable"]
+# `wp_fractional_scale_manager_v1` (staging) + `wp_viewporter` (stable).
+# When the manager is advertised, every Toplevel + LayerSurface gets a
+# per-surface fractional-scale listener + a viewport, and
+# `WindowEvent::ScaleFactorChanged` reports the fractional value
+# (rather than just the integer max-output scale).
 fractional-scale = []
 
 [dependencies]

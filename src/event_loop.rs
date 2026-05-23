@@ -147,6 +147,17 @@ impl<T> EventLoop<T> {
         self.state.exit_requested = true;
     }
 
+    /// Snapshot of every output currently connected.
+    ///
+    /// Each entry includes scale, position, physical size, name +
+    /// description (when the compositor advertises them). Use the
+    /// `OutputId` to compare entries across calls. Consumers should
+    /// re-poll on `WindowEvent::ScaleFactorChanged` to pick up any
+    /// per-output changes the compositor signalled.
+    pub fn outputs(&self) -> Vec<crate::OutputInfo> {
+        self.state.outputs.values().map(|o| o.snapshot()).collect()
+    }
+
     /// Set the cursor shape shown over the currently-focused pointer
     /// surface. The compositor only honours the request while one of
     /// our surfaces holds pointer focus (the `enter` serial wayr

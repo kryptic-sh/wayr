@@ -124,6 +124,15 @@ pub struct LayerSurface {
     pub(crate) wl_surface: WlSurface,
     pub(crate) layer_surface: ZwlrLayerSurfaceV1,
     pub(crate) state: Rc<RefCell<LayerSurfaceState>>,
+    /// Per-surface `wp_fractional_scale_v1` — see [`crate::Toplevel`]'s
+    /// field of the same name.
+    #[cfg(feature = "fractional-scale")]
+    pub(crate) fractional_scale: Option<
+        wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1,
+    >,
+    /// Per-surface `wp_viewport`.
+    #[cfg(feature = "fractional-scale")]
+    pub(crate) viewport: Option<wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport>,
 }
 
 impl LayerSurface {
@@ -170,10 +179,40 @@ impl LayerSurface {
     pub fn set_cursor<T>(&self, event_loop: &EventLoop<T>, icon: CursorIcon) {
         event_loop.set_cursor(icon);
     }
+
+    /// Physical buffer size to render at to match the current logical
+    /// size given the active scale factor. See
+    /// [`crate::Toplevel::physical_size`].
+    pub fn physical_size(&self) -> Size {
+        let st = self.state.borrow();
+        let s = st.scale_factor.max(1.0);
+        Size::new(
+            (st.current_size.width as f64 * s).ceil() as u32,
+            (st.current_size.height as f64 * s).ceil() as u32,
+        )
+    }
+
+    /// Manually override the `wp_viewport` destination. See
+    /// [`crate::Toplevel::set_viewport_destination`].
+    #[cfg(feature = "fractional-scale")]
+    pub fn set_viewport_destination(&self, size: Size) {
+        if let Some(vp) = &self.viewport {
+            vp.set_destination(size.width.max(1) as i32, size.height.max(1) as i32);
+        }
+    }
 }
 
 impl Drop for LayerSurface {
     fn drop(&mut self) {
+        #[cfg(feature = "fractional-scale")]
+        {
+            if let Some(fs) = self.fractional_scale.take() {
+                fs.destroy();
+            }
+            if let Some(vp) = self.viewport.take() {
+                vp.destroy();
+            }
+        }
         self.layer_surface.destroy();
         self.wl_surface.destroy();
     }
@@ -326,11 +365,29 @@ impl LayerSurfaceBuilder {
             layer_surface.set_keyboard_interactivity(ki.to_protocol());
         }
 
+        // Attach fractional-scale + viewport extensions if available.
+        #[cfg(feature = "fractional-scale")]
+        let fractional_scale = event_loop
+            .connection_globals()
+            .fractional_scale_manager
+            .as_ref()
+            .map(|m| m.get_fractional_scale(&wl_surface, &qh, surface_id));
+        #[cfg(feature = "fractional-scale")]
+        let viewport = event_loop
+            .connection_globals()
+            .viewporter
+            .as_ref()
+            .map(|v| v.get_viewport(&wl_surface, &qh, ()));
+
         let state = Rc::new(RefCell::new(LayerSurfaceState {
             current_size: Size::default(),
             preferred_size: size,
             scale_factor: 1.0,
+            fractional_scale_120: None,
+            touched_outputs: Default::default(),
             closed: false,
+            #[cfg(feature = "fractional-scale")]
+            viewport: viewport.clone(),
         }));
         event_loop
             .state
@@ -348,6 +405,10 @@ impl LayerSurfaceBuilder {
             wl_surface,
             layer_surface,
             state,
+            #[cfg(feature = "fractional-scale")]
+            fractional_scale,
+            #[cfg(feature = "fractional-scale")]
+            viewport,
         })
     }
 }

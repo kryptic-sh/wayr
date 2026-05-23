@@ -80,6 +80,7 @@ mod event;
 mod event_loop;
 mod geometry;
 mod keyboard;
+mod output;
 mod pointer;
 mod surface;
 mod toplevel;
@@ -100,6 +101,7 @@ pub use crate::event::{Event, WindowEvent};
 pub use crate::event_loop::{ApplicationHandler, EventLoop, EventLoopProxy};
 pub use crate::geometry::{Position, Rect, Size};
 pub use crate::keyboard::{KeyCode, KeyEvent, KeyState, Keymap, Modifiers, RepeatInfo, ScanCode};
+pub use crate::output::{OutputId, OutputInfo};
 pub use crate::pointer::{
     AxisDirection, AxisSource, PointerButton, PointerButtonState, PointerPosition, ScrollEvent,
 };
