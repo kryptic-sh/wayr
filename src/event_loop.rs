@@ -242,6 +242,40 @@ impl<T> EventLoop<T> {
     pub(crate) fn wl_connection(&self) -> &WlConnection {
         &self.connection.wl
     }
+
+    /// Raw `wl_compositor*` pointer (FFI). Exposed so embedders (e.g.
+    /// WPE WebKit via buffr-webkit's `BuffrDisplayWayland` C
+    /// subclass) can create their own `wl_surface`s on wayr's
+    /// connection. Returns `None` if wayr's compositor proxy is
+    /// dead (shouldn't happen for the lifetime of `&self`).
+    pub fn wl_compositor_ptr(&self) -> Option<std::ptr::NonNull<std::ffi::c_void>> {
+        use wayland_client::Proxy;
+        let id = self.connection.globals.compositor.id();
+        std::ptr::NonNull::new(id.as_ptr().cast::<std::ffi::c_void>())
+    }
+
+    /// Raw `wl_subcompositor*` pointer (FFI). Embedders use this to
+    /// create their own `wl_subsurface`s when they own the
+    /// embedding decision (vs wayr-managed subsurfaces via
+    /// `Subsurface::builder`). buffr's WPE WebKit backend uses
+    /// this path because WPE's `BuffrDisplayWayland` subclass
+    /// constructs its own subsurface internally.
+    pub fn wl_subcompositor_ptr(&self) -> Option<std::ptr::NonNull<std::ffi::c_void>> {
+        use wayland_client::Proxy;
+        let id = self.connection.globals.subcompositor.id();
+        std::ptr::NonNull::new(id.as_ptr().cast::<std::ffi::c_void>())
+    }
+
+    /// Raw `wl_display*` pointer (FFI). Same handle that's exposed
+    /// via the `raw-display-handle` trait; this convenience version
+    /// returns the raw pointer directly for embedders that don't
+    /// want to bring `raw-window-handle` into scope.
+    pub fn wl_display_ptr(&self) -> Option<std::ptr::NonNull<std::ffi::c_void>> {
+        use wayland_client::Proxy;
+        let display = self.connection.wl.display();
+        let id = display.id();
+        std::ptr::NonNull::new(id.as_ptr().cast::<std::ffi::c_void>())
+    }
 }
 
 /// Send-able / clone-able handle for dispatching user events into the

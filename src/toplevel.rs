@@ -68,10 +68,14 @@ impl Toplevel {
     }
 
     /// Access the raw `wl_surface` pointer for FFI consumers (e.g.
-    /// embedding a WPE WebKit child via `wl_subsurface`). Subsurface
-    /// API hangs off this (#12).
-    pub fn wl_surface_id(&self) -> u32 {
-        self.wl_surface.id().protocol_id()
+    /// embedding a WPE WebKit child via `wl_subsurface`). The
+    /// `wayr::Subsurface` API hangs off this; for embedders that
+    /// own their own subsurface lifecycle (e.g. WPE's
+    /// `BuffrDisplayWayland` subclass) this raw pointer is what
+    /// they hand into their constructor as the `parent_wl_surface`.
+    pub fn wl_surface_ptr(&self) -> Option<std::ptr::NonNull<std::ffi::c_void>> {
+        let id = self.wl_surface.id();
+        std::ptr::NonNull::new(id.as_ptr().cast::<std::ffi::c_void>())
     }
 }
 
