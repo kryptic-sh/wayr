@@ -72,9 +72,12 @@ libc = "0.2"
 xkbcommon = "0.8"
 
 [dev-dependencies]
-# examples/ smoke tests pull wgpu here once #6 (raw-window-handle)
-# lands. Connection tests use tracing-subscriber for log surfacing.
+# Connection tests use tracing-subscriber for log surfacing.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Examples land per-phase. `toplevel` arrives with #9; `layer-shell`
-# with #11; `subsurface` with #12; `ime` with #15; `clipboard` with #14.
+# `examples/toplevel.rs` paints a wgpu clear-to-colour to prove the
+# raw-window-handle integration works end-to-end. wgpu 29 is what
+# buffr-poc + buffr-app pin to; keep in lockstep.
+wgpu = "29"
+pollster = "0.4"
+anyhow = "1"

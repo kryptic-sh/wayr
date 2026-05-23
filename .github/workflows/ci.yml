@@ -92,6 +92,11 @@ jobs:
       - name: cargo test (doctests)
         run: cargo test --workspace --all-features --doc
 
+      - name: cargo build --examples
+        # Examples pull in wgpu and prove the raw-window-handle wiring
+        # end-to-end; CI just verifies they compile (no GPU here).
+        run: cargo build --workspace --examples --all-features
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
