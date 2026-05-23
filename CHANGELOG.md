@@ -8,6 +8,24 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-05-23
+
+### Added
+
+- Key-repeat is now driven by wayr. Holding a key fires a stream of
+  `WindowEvent::Key { repeat: true, .. }` events paced by the compositor's
+  `wl_keyboard.repeat_info` (delay + rate). xkbcommon's
+  `keymap.key_repeats(...)` is consulted so modifier keys and similar
+  non-repeatable keys don't generate repeats. The first repeat fires after
+  `delay_ms` ms; subsequent repeats every `1000 / rate_hz` ms. Releasing the
+  repeating key, focus loss, or the compositor sending `rate == 0` (repeat
+  disabled) all stop the synthesis cleanly.
+- `EventLoop`'s `blocking_pump` timeout is now capped at the next repeat-fire
+  deadline (or 50 ms, whichever is sooner), so repeats fire on time even when no
+  other events arrive.
+
+[0.1.5]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.5
+
 ## [0.1.4] - 2026-05-23
 
 ### Changed
@@ -84,7 +102,7 @@ and this project adheres to
   queued for a future release; this immediate path is sufficient for the
   consumer that needed it.
 
-[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.5...HEAD
 [0.1.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.1
 
 ## [0.1.0] - 2026-05-23

@@ -210,16 +210,30 @@ impl<T> EventLoop<T> {
             // wait the full 50ms when no socket events are arriving.
             self.drain_redraw_requests();
 
+            // Synthesize any due key-repeat events (compositor-paced
+            // via wl_keyboard.repeat_info). Run before blocking_pump
+            // for the same reason as drain_redraw_requests.
+            self.drain_key_repeats();
+
             // Blocking pump: wait for incoming socket data or user
-            // events. 50ms cap so user-event wakeups don't sleep
-            // forever. Bigger budgets are a post-MVP optimisation
-            // (eventfd-style wake or calloop integration).
-            //
-            // If `drain_redraw_requests` queued events, blocking_pump
-            // returns immediately (its first action checks
-            // `pending_events.is_empty()`), so request_redraw → paint
-            // has the same iteration latency as winit's path.
-            self.blocking_pump(Duration::from_millis(50));
+            // events. Capped to whichever is sooner: 50 ms (so
+            // user-event wakeups don't sleep forever), or the next
+            // key-repeat fire time. If `drain_*` queued events,
+            // blocking_pump returns immediately (its first action
+            // checks `pending_events.is_empty()`).
+            let pump_cap = Duration::from_millis(50);
+            let timeout = self
+                .state
+                .keyboard
+                .repeating
+                .as_ref()
+                .map(|r| {
+                    r.next_fire_at
+                        .saturating_duration_since(Instant::now())
+                        .min(pump_cap)
+                })
+                .unwrap_or(pump_cap);
+            self.blocking_pump(timeout);
 
             // Drain whatever the dispatch produced. `std::mem::take`
             // empties the Vec so we don't keep re-iterating the same
@@ -279,6 +293,48 @@ impl<T> EventLoop<T> {
             self.state.pending_events.push(Event::WindowEvent {
                 surface_id: sid,
                 event: WindowEvent::RedrawRequested,
+            });
+        }
+    }
+
+    /// Synthesize a `WindowEvent::Key { repeat: true }` for each
+    /// repeat tick that's due, advancing the per-keyboard
+    /// `next_fire_at` by `1000 / rate_hz` ms each time. Drives
+    /// compositor-paced key-repeat using the `delay` / `rate`
+    /// values from `wl_keyboard.repeat_info`.
+    fn drain_key_repeats(&mut self) {
+        let rate_hz = self.state.keyboard.repeat_rate_hz;
+        if rate_hz <= 0 {
+            return;
+        }
+        let period = Duration::from_millis((1000 / rate_hz.max(1)) as u64);
+        let modifiers = self.state.keyboard.modifiers;
+        let now = Instant::now();
+        // Fire 0+ ticks until we've caught up to `now`, then update
+        // next_fire_at to the next future deadline. Catch-up is
+        // bounded so a long blocking caller can't queue thousands.
+        let mut budget: u8 = 32;
+        loop {
+            let Some(rep) = self.state.keyboard.repeating.as_mut() else {
+                return;
+            };
+            if rep.next_fire_at > now || budget == 0 {
+                return;
+            }
+            budget -= 1;
+            let event = crate::WindowEvent::Key(crate::KeyEvent {
+                scancode: rep.scancode,
+                key_code: rep.key_code.clone(),
+                modifiers,
+                state: crate::KeyState::Pressed,
+                text: rep.text.clone(),
+                repeat: true,
+            });
+            let sid = rep.surface_id;
+            rep.next_fire_at += period;
+            self.state.pending_events.push(Event::WindowEvent {
+                surface_id: sid,
+                event,
             });
         }
     }

@@ -325,6 +325,30 @@ pub(crate) struct KeyboardState {
     /// Cached modifier state — updated on `wl_keyboard.modifiers`,
     /// surfaced on every `KeyEvent` + `PointerButton`.
     pub(crate) modifiers: Modifiers,
+    /// Repeat rate in keys per second from the compositor's
+    /// `wl_keyboard.repeat_info` event. `0` disables repeat
+    /// (compositor explicitly said no). Default `30` if the
+    /// compositor never advertises (legacy behaviour).
+    pub(crate) repeat_rate_hz: i32,
+    /// Repeat delay in milliseconds before the first repeat fires
+    /// after a key is held. `0` disables. Default `500ms`.
+    pub(crate) repeat_delay_ms: i32,
+    /// The currently-held repeatable key, if any. Set on Key Pressed
+    /// (when the keymap says the key repeats); cleared on Released
+    /// (when scancode matches) or on focus loss.
+    pub(crate) repeating: Option<RepeatingKey>,
+}
+
+/// State for synthesizing key-repeat events. Holds enough to
+/// reconstruct a `KeyEvent` clone for the repeat dispatch, plus the
+/// next-fire deadline.
+#[derive(Clone)]
+pub(crate) struct RepeatingKey {
+    pub(crate) surface_id: SurfaceId,
+    pub(crate) scancode: ScanCode,
+    pub(crate) key_code: KeyCode,
+    pub(crate) text: Option<String>,
+    pub(crate) next_fire_at: std::time::Instant,
 }
 
 /// xkbcommon `Context` + `Keymap` + `State`, bundled. Constructed
@@ -838,6 +862,10 @@ impl Dispatch<WlKeyboard, ()> for State {
                     });
                 }
                 state.keyboard.focused_surface = None;
+                // Stop any in-flight key repeat — the focused surface
+                // is gone, the user can't be "holding" anything from
+                // our window any more.
+                state.keyboard.repeating = None;
             }
             WlKeyboardEvent::Key {
                 key,
@@ -890,6 +918,10 @@ impl Dispatch<WlKeyboard, ()> for State {
                     _ => return,
                 };
                 let modifiers = state.keyboard.modifiers;
+                // Clone bits we may need for the repeat-state tracker
+                // before we move the KeyEvent into pending_events.
+                let key_code_clone = key_code.clone();
+                let text_clone = text_opt.clone();
                 state.pending_events.push(Event::WindowEvent {
                     surface_id,
                     event: WindowEvent::Key(KeyEvent {
@@ -901,6 +933,53 @@ impl Dispatch<WlKeyboard, ()> for State {
                         repeat: false,
                     }),
                 });
+
+                // Arm / disarm key-repeat tracking based on press/release.
+                match state_variant {
+                    WayrKeyState::Pressed => {
+                        // Only arm if the compositor advertised a
+                        // positive rate AND xkbcommon says this key
+                        // repeats (modifier keys, lock keys, etc.
+                        // typically don't).
+                        let key_repeats = xkb.keymap.key_repeats(keycode);
+                        if state.keyboard.repeat_rate_hz > 0
+                            && state.keyboard.repeat_delay_ms > 0
+                            && key_repeats
+                        {
+                            let delay = std::time::Duration::from_millis(
+                                state.keyboard.repeat_delay_ms.max(0) as u64,
+                            );
+                            state.keyboard.repeating = Some(RepeatingKey {
+                                surface_id,
+                                scancode: ScanCode(key),
+                                key_code: key_code_clone,
+                                text: text_clone,
+                                next_fire_at: std::time::Instant::now() + delay,
+                            });
+                        } else {
+                            // Non-repeatable key clears any prior
+                            // repeat state — pressing a new key
+                            // while another was held cancels the
+                            // previous repeat.
+                            state.keyboard.repeating = None;
+                        }
+                    }
+                    WayrKeyState::Released => {
+                        // Only stop repeating if THIS released key is
+                        // the one currently set as the repeat source.
+                        // Otherwise (typical: modifier release while
+                        // a letter is still held), leave the repeat
+                        // alone.
+                        if state
+                            .keyboard
+                            .repeating
+                            .as_ref()
+                            .is_some_and(|r| r.scancode == ScanCode(key))
+                        {
+                            state.keyboard.repeating = None;
+                        }
+                    }
+                }
             }
             WlKeyboardEvent::Modifiers {
                 mods_depressed,
@@ -915,10 +994,21 @@ impl Dispatch<WlKeyboard, ()> for State {
                     state.keyboard.modifiers = modifiers_from_xkb(&xkb.state, &xkb.keymap);
                 }
             }
-            WlKeyboardEvent::RepeatInfo { .. } => {
-                // Stored for future key-repeat timer wiring; v0.1
-                // doesn't synthesise repeats yet (timer integration
-                // lands in a Phase 1 follow-up).
+            WlKeyboardEvent::RepeatInfo { rate, delay } => {
+                // `rate` is keys-per-second, `delay` is milliseconds
+                // before the first repeat. `rate == 0` per protocol
+                // disables key-repeat entirely; we mirror that
+                // verbatim so the loop's repeat-synthesis branch
+                // becomes inert.
+                state.keyboard.repeat_rate_hz = rate;
+                state.keyboard.repeat_delay_ms = delay;
+                // If a key was already being tracked when the new
+                // settings arrived (rare — RepeatInfo usually arrives
+                // before any Key), clear it so the next press
+                // re-arms with the fresh delay.
+                if rate <= 0 || delay <= 0 {
+                    state.keyboard.repeating = None;
+                }
             }
             _ => {}
         }
