@@ -1432,8 +1432,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                 // size or scale delta. Only emit Resized /
                 // ScaleFactorChanged when the value actually moved.
                 let emit_resized = new_size != tl_state.last_emitted_size;
-                let emit_scale =
-                    (scale - tl_state.last_emitted_scale).abs() > f64::EPSILON;
+                let emit_scale = (scale - tl_state.last_emitted_scale).abs() > f64::EPSILON;
                 if emit_resized {
                     tl_state.last_emitted_size = new_size;
                 }
@@ -1726,8 +1725,7 @@ impl
                     // Dedupe (see XdgSurface::Configure handler for the
                     // rationale — same applies to layer-shell).
                     let emit_resized = new_size != ls_state.last_emitted_size;
-                    let emit_scale =
-                        (scale - ls_state.last_emitted_scale).abs() > f64::EPSILON;
+                    let emit_scale = (scale - ls_state.last_emitted_scale).abs() > f64::EPSILON;
                     if emit_resized {
                         ls_state.last_emitted_size = new_size;
                     }
