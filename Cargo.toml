@@ -28,8 +28,16 @@ fractional-scale = []
 # Used by layer-shell `Anchor` flags and text-input `ContentHint`.
 bitflags = "2"
 
+# raw-window-handle 0.6 trait crate. Implemented for Toplevel +
+# EventLoop so wgpu / vulkano / glow consumers can build a surface
+# without depending on a specific GPU crate version.
+raw-window-handle = "0.6"
+
 # Wayland protocol primitives + connection management.
-wayland-client = "0.31"
+# `system` feature enables ObjectId::as_ptr() — required for handing
+# wl_proxy pointers to wgpu / vulkano / FFI consumers via
+# raw-window-handle.
+wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = true }
 
@@ -41,6 +49,7 @@ tracing = "0.1"
 # a calloop adapter that registers the wl_display fd as a source.
 calloop = "0.14"
 calloop-wayland-source = "0.4"
+libc = "0.2"
 
 [dev-dependencies]
 # examples/ smoke tests pull wgpu here once #6 (raw-window-handle)
