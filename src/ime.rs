@@ -1,20 +1,24 @@
 //! IME (text-input-v3) state + events.
 //!
-//! Lands in #15 (Phase 6). Gated behind the `text-input` feature.
 //! Primary consumer: buffr (CJK / dead-key composition in web forms).
+//! Gated behind the `text-input` feature.
+
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
+    ContentHint as WlContentHint, ContentPurpose as WlContentPurpose, ZwpTextInputV3,
+};
 
 use crate::geometry::Rect;
 
 /// Per-surface IME control surface.
 ///
-/// Obtained via `Toplevel::ime()` / `Subsurface::ime()` (added in #15).
-/// IME state has its own lifecycle (enable / disable / preedit /
-/// commit / cursor-rect updates) that doesn't slot cleanly into a
-/// single event stream — the imperative API here lets consumers
-/// drive activation in response to focus changes and form-field
-/// transitions.
+/// Obtained via `Toplevel::ime()` / `LayerSurface::ime()`. In
+/// text-input-v3 the protocol object is per-seat (only one
+/// focused surface at a time), so all `Ime` instances on the same
+/// `EventLoop` share the underlying proxy — calls on the
+/// non-focused surface's `Ime` are still safe (the compositor
+/// ignores them until focus comes back).
 pub struct Ime {
-    pub(crate) _private: (),
+    pub(crate) wp: ZwpTextInputV3,
 }
 
 impl Ime {
@@ -23,40 +27,66 @@ impl Ime {
     /// events when the user composes characters.
     ///
     /// Typically called when the user focuses a text input field.
+    /// Calling on an unfocused surface is a no-op until focus.
     pub fn enable(&self) {
-        unimplemented!("#15: zwp_text_input_v3.enable + commit")
+        self.wp.enable();
+        self.wp.commit();
     }
 
     /// Deactivate IME for this surface. Called when leaving a text
     /// field so the IME's candidate window dismisses.
     pub fn disable(&self) {
-        unimplemented!("#15: zwp_text_input_v3.disable + commit")
+        self.wp.disable();
+        self.wp.commit();
     }
 
     /// Set the on-screen rectangle the focused text cursor occupies,
     /// in surface-local logical pixels. The IME positions its
     /// candidate popup relative to this rect.
-    pub fn set_cursor_rect(&self, _rect: Rect) {
-        unimplemented!("#15: zwp_text_input_v3.set_cursor_rectangle")
+    pub fn set_cursor_rect(&self, rect: Rect) {
+        self.wp.set_cursor_rectangle(
+            rect.position.x,
+            rect.position.y,
+            rect.size.width as i32,
+            rect.size.height as i32,
+        );
+        self.wp.commit();
     }
 
     /// Tell the IME what kind of text the user is entering. Affects
     /// candidate ranking + on-screen keyboard layout on touch devices.
-    pub fn set_purpose(&self, _purpose: ContentPurpose) {
-        unimplemented!("#15: zwp_text_input_v3.set_content_type")
+    pub fn set_purpose(&self, purpose: ContentPurpose) {
+        // ContentHint is the second arg; pass a sensible default of
+        // None when consumer calls set_purpose alone. Consumers
+        // wanting both should call set_hint after set_purpose; only
+        // the last `set_content_type` request before `commit` wins.
+        self.wp
+            .set_content_type(WlContentHint::None, purpose.to_protocol());
+        self.wp.commit();
     }
 
     /// Hint flags that affect IME behaviour orthogonally to purpose
     /// (e.g. `MULTILINE` for chat boxes, `SENSITIVE` for passwords).
-    pub fn set_hint(&self, _hint: ContentHint) {
-        unimplemented!("#15: zwp_text_input_v3.set_content_type")
+    pub fn set_hint(&self, hint: ContentHint) {
+        self.wp
+            .set_content_type(hint.to_protocol(), WlContentPurpose::Normal);
+        self.wp.commit();
+    }
+
+    /// Set both purpose + hint in a single committed request.
+    pub fn set_content_type(&self, purpose: ContentPurpose, hint: ContentHint) {
+        self.wp
+            .set_content_type(hint.to_protocol(), purpose.to_protocol());
+        self.wp.commit();
     }
 
     /// Inform the IME of the text surrounding the cursor (used for
     /// context-aware composition — e.g. word completion needs to see
     /// the word being typed).
-    pub fn set_surrounding_text(&self, _text: &str, _cursor: u32, _anchor: u32) {
-        unimplemented!("#15: zwp_text_input_v3.set_surrounding_text")
+    pub fn set_surrounding_text(&self, text: &str, cursor: u32, anchor: u32) {
+        self.wp
+            .set_surrounding_text(text.to_owned(), cursor as i32, anchor as i32);
+        self.wp.commit();
     }
 }
 
@@ -95,6 +125,27 @@ pub enum ContentPurpose {
     Terminal,
 }
 
+impl ContentPurpose {
+    fn to_protocol(self) -> WlContentPurpose {
+        match self {
+            ContentPurpose::Normal => WlContentPurpose::Normal,
+            ContentPurpose::Alpha => WlContentPurpose::Alpha,
+            ContentPurpose::Digits => WlContentPurpose::Digits,
+            ContentPurpose::Number => WlContentPurpose::Number,
+            ContentPurpose::Phone => WlContentPurpose::Phone,
+            ContentPurpose::Url => WlContentPurpose::Url,
+            ContentPurpose::Email => WlContentPurpose::Email,
+            ContentPurpose::Name => WlContentPurpose::Name,
+            ContentPurpose::Password => WlContentPurpose::Password,
+            ContentPurpose::Pin => WlContentPurpose::Pin,
+            ContentPurpose::Date => WlContentPurpose::Date,
+            ContentPurpose::Time => WlContentPurpose::Time,
+            ContentPurpose::Datetime => WlContentPurpose::Datetime,
+            ContentPurpose::Terminal => WlContentPurpose::Terminal,
+        }
+    }
+}
+
 bitflags::bitflags! {
     /// Hint flags. Maps to `zwp_text_input_v3.content_hint`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -119,6 +170,43 @@ bitflags::bitflags! {
         const LATIN         = 1 << 8;
         /// Allow multiple lines (Enter inserts newline rather than submit).
         const MULTILINE     = 1 << 9;
+    }
+}
+
+impl ContentHint {
+    fn to_protocol(self) -> WlContentHint {
+        let mut out = WlContentHint::None;
+        if self.contains(ContentHint::COMPLETION) {
+            out |= WlContentHint::Completion;
+        }
+        if self.contains(ContentHint::SPELLCHECK) {
+            out |= WlContentHint::Spellcheck;
+        }
+        if self.contains(ContentHint::AUTO_CAPITAL) {
+            out |= WlContentHint::AutoCapitalization;
+        }
+        if self.contains(ContentHint::LOWERCASE) {
+            out |= WlContentHint::Lowercase;
+        }
+        if self.contains(ContentHint::UPPERCASE) {
+            out |= WlContentHint::Uppercase;
+        }
+        if self.contains(ContentHint::TITLECASE) {
+            out |= WlContentHint::Titlecase;
+        }
+        if self.contains(ContentHint::HIDDEN_TEXT) {
+            out |= WlContentHint::HiddenText;
+        }
+        if self.contains(ContentHint::SENSITIVE_DATA) {
+            out |= WlContentHint::SensitiveData;
+        }
+        if self.contains(ContentHint::LATIN) {
+            out |= WlContentHint::Latin;
+        }
+        if self.contains(ContentHint::MULTILINE) {
+            out |= WlContentHint::Multiline;
+        }
+        out
     }
 }
 

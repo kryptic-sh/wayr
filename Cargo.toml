@@ -19,7 +19,10 @@ categories = ["gui", "os::linux-apis"]
 default = []
 layer-shell = ["dep:wayland-protocols-wlr"]
 subsurface = []
-text-input = []
+# zwp_text_input_v3 — IME composition + cursor positioning. Pulls in
+# the wayland-protocols `unstable` set (where text-input-v3 still
+# lives upstream despite being the de-facto IME protocol).
+text-input = ["wayland-protocols/unstable"]
 # `clipboard` feature dropped — use `hjkl-clipboard` crate instead.
 # It implements wl_data_device over a raw Wayland socket
 # (orthogonal to wayr's connection) with text + HTML + RTF +

@@ -62,10 +62,24 @@ impl<T> EventLoop<T> {
     /// dispatch events.
     pub fn new() -> Result<Self> {
         let connection = Connection::connect_to_env()?;
+        let mut state = State::default();
         let (user_tx, user_rx) = mpsc::channel();
+
+        // text-input-v3 is a per-seat object; we have both the
+        // manager + seat by this point so spawn it eagerly. Surfaces
+        // get an `Ime` accessor that mutates this single proxy
+        // (text_input follows keyboard focus across surfaces, only
+        // one focused at a time per protocol).
+        #[cfg(feature = "text-input")]
+        if let Some(manager) = &connection.globals.text_input_manager {
+            let qh = connection.queue.handle();
+            let ti = manager.get_text_input(&connection.globals.seat, &qh, ());
+            state.text_input.wp = Some(ti);
+        }
+
         Ok(Self {
             connection,
-            state: State::default(),
+            state,
             user_tx,
             user_rx,
         })

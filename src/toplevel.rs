@@ -77,6 +77,28 @@ impl Toplevel {
         let id = self.wl_surface.id();
         std::ptr::NonNull::new(id.as_ptr().cast::<std::ffi::c_void>())
     }
+
+    /// IME (text-input-v3) accessor. Returns `None` when the
+    /// compositor doesn't advertise `zwp_text_input_manager_v3`
+    /// (almost no modern compositors lack it — KWin / Mutter / sway
+    /// / Hyprland / River all expose it). Consumer typically calls
+    /// `enable()` on focus-into a text field, `disable()` on
+    /// focus-out.
+    ///
+    /// Note: text-input-v3 is per-seat, not per-surface — calls on
+    /// an unfocused surface's `Ime` accessor are silently ignored
+    /// by the compositor until focus returns. The accessor exists
+    /// per surface for ergonomic consistency with other surface
+    /// methods.
+    #[cfg(feature = "text-input")]
+    pub fn ime<T>(&self, event_loop: &crate::EventLoop<T>) -> Option<crate::Ime> {
+        event_loop
+            .state
+            .text_input
+            .wp
+            .as_ref()
+            .map(|wp| crate::Ime { wp: wp.clone() })
+    }
 }
 
 impl Drop for Toplevel {

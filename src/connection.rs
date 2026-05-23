@@ -47,6 +47,15 @@ use crate::pointer::{
 };
 use crate::surface::SurfaceId;
 
+#[cfg(feature = "text-input")]
+use crate::ime::ImeEvent;
+#[cfg(feature = "text-input")]
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
+#[cfg(feature = "text-input")]
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
+    Event as TextInputV3Event, ZwpTextInputV3,
+};
+
 /// Owning handle for the live Wayland connection + bound globals.
 ///
 /// One per [`crate::EventLoop`]. Dropped on event-loop teardown; the
@@ -103,6 +112,11 @@ pub(crate) struct Globals {
     pub(crate) layer_shell: Option<
         wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1,
     >,
+
+    /// `zwp_text_input_manager_v3` — only when the `text-input`
+    /// feature is on AND the compositor advertises it.
+    #[cfg(feature = "text-input")]
+    pub(crate) text_input_manager: Option<ZwpTextInputManagerV3>,
 }
 
 /// Per-layer-surface state, parallel to [`ToplevelState`]. Shared
@@ -146,6 +160,35 @@ pub(crate) struct ToplevelState {
     /// Effective scale factor (composed output scale ×
     /// fractional-scale). Defaults to 1.0; wired in #13.
     pub(crate) scale_factor: f64,
+}
+
+/// Per-seat text-input state. v0.1 supports a single seat.
+///
+/// `zwp_text_input_v3` is a single object per seat that follows
+/// keyboard focus (via its own `enter`/`leave` events). Each
+/// `Toplevel` / `LayerSurface` gets a [`crate::Ime`] accessor that
+/// shares this state via `Rc<RefCell<_>>`.
+#[cfg(feature = "text-input")]
+#[derive(Default)]
+pub(crate) struct TextInputState {
+    /// The per-seat `zwp_text_input_v3` proxy. `None` until the
+    /// compositor advertises the manager AND wl_seat is bound.
+    pub(crate) wp: Option<ZwpTextInputV3>,
+    /// Whether the consumer last requested `enable` on this seat.
+    /// Mirrors the protocol's "is enabled" state for the surface
+    /// owning focus.
+    pub(crate) enabled: bool,
+    /// Last `serial` from the compositor's `done` event — required
+    /// when committing client state.
+    pub(crate) last_done_serial: u32,
+    /// Surface the text_input has `entered` (= got keyboard focus
+    /// for IME purposes). `None` between enter/leave pairs.
+    pub(crate) focused_surface: Option<SurfaceId>,
+    /// Pending events accumulated since the last `done` boundary —
+    /// drained into `WindowEvent::Ime` on `done`.
+    pub(crate) pending_preedit: Option<(String, Option<u32>)>,
+    pub(crate) pending_commit: Option<String>,
+    pub(crate) pending_delete: Option<(u32, u32)>,
 }
 
 /// Per-keyboard state. v0.1 supports a single seat keyboard.
@@ -226,6 +269,10 @@ pub(crate) struct State {
     /// Keyboard state.
     pub(crate) keyboard: KeyboardState,
 
+    /// Text-input (IME) state. v0.1 supports a single seat.
+    #[cfg(feature = "text-input")]
+    pub(crate) text_input: TextInputState,
+
     /// Monotonic `SurfaceId` counter. Wraps at u64::MAX (effectively
     /// never).
     pub(crate) next_surface_id: u64,
@@ -300,6 +347,10 @@ impl Connection {
             wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1,
         > = bind_optional(&global_list, &qh, "zwlr_layer_shell_v1", 4);
 
+        #[cfg(feature = "text-input")]
+        let text_input_manager: Option<ZwpTextInputManagerV3> =
+            bind_optional(&global_list, &qh, "zwp_text_input_manager_v3", 1);
+
         Ok(Connection {
             wl,
             queue,
@@ -312,6 +363,8 @@ impl Connection {
                 outputs,
                 #[cfg(feature = "layer-shell")]
                 layer_shell,
+                #[cfg(feature = "text-input")]
+                text_input_manager,
             },
         })
     }
@@ -458,6 +511,9 @@ impl Dispatch<WlSeat, ()> for State {
                 state.keyboard.wl_keyboard = Some(seat.get_keyboard(qh, ()));
             }
             // Capability::Touch handled in #16.
+            // text-input-v3: bound eagerly in `EventLoop::new`
+            // because we need the manager proxy + seat at the same
+            // time and they both exist by then. No work here.
         }
     }
 }
@@ -990,6 +1046,113 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                 // Compositor advertising which titlebar buttons
                 // (minimise / maximise / fullscreen) it implements.
                 // v0.1 ignores.
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(feature = "text-input")]
+impl Dispatch<ZwpTextInputManagerV3, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ZwpTextInputManagerV3,
+        _: <ZwpTextInputManagerV3 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        // No events on the manager — per-text_input events go to
+        // ZwpTextInputV3 below.
+    }
+}
+
+#[cfg(feature = "text-input")]
+impl Dispatch<ZwpTextInputV3, ()> for State {
+    fn event(
+        state: &mut Self,
+        _text_input: &ZwpTextInputV3,
+        event: <ZwpTextInputV3 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            TextInputV3Event::Enter { surface } => {
+                state.text_input.focused_surface = state.surface_id_by_wl.get(&surface).copied();
+            }
+            TextInputV3Event::Leave { .. } => {
+                state.text_input.focused_surface = None;
+                // Reset enabled flag — consumer must re-enable on
+                // next focus.
+                state.text_input.enabled = false;
+            }
+            TextInputV3Event::PreeditString {
+                text,
+                cursor_begin,
+                cursor_end,
+            } => {
+                // text-input-v3 spec: text may be null/empty meaning
+                // "clear preedit". cursor_begin == cursor_end is the
+                // caret position; if either is -1 hide caret.
+                let preedit_text = text.unwrap_or_default();
+                let cursor = if cursor_begin < 0 || cursor_end < 0 {
+                    None
+                } else {
+                    // wayr's API surfaces a single cursor offset;
+                    // the byte range [begin, end) is a selection
+                    // hint we collapse to `begin` for now.
+                    Some(cursor_begin as u32)
+                };
+                state.text_input.pending_preedit = Some((preedit_text, cursor));
+            }
+            TextInputV3Event::CommitString { text } => {
+                state.text_input.pending_commit = Some(text.unwrap_or_default());
+            }
+            TextInputV3Event::DeleteSurroundingText {
+                before_length,
+                after_length,
+            } => {
+                state.text_input.pending_delete = Some((before_length, after_length));
+            }
+            TextInputV3Event::Done { serial } => {
+                state.text_input.last_done_serial = serial;
+                let surface_id = match state.text_input.focused_surface {
+                    Some(id) => id,
+                    None => {
+                        // Done without focus — drop pending state.
+                        state.text_input.pending_preedit = None;
+                        state.text_input.pending_commit = None;
+                        state.text_input.pending_delete = None;
+                        return;
+                    }
+                };
+                // Order matches the text-input-v3 spec's "the order
+                // of application is: delete_surrounding_text first,
+                // then commit_string, then preedit_string"
+                // (preedit replaces existing preedit; commit is the
+                // committed text; delete is around the cursor).
+                if let Some((before, after)) = state.text_input.pending_delete.take() {
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id,
+                        event: WindowEvent::Ime(ImeEvent::DeleteSurroundingText {
+                            before_bytes: before,
+                            after_bytes: after,
+                        }),
+                    });
+                }
+                if let Some(text) = state.text_input.pending_commit.take() {
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id,
+                        event: WindowEvent::Ime(ImeEvent::Commit(text)),
+                    });
+                }
+                if let Some((text, cursor)) = state.text_input.pending_preedit.take() {
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id,
+                        event: WindowEvent::Ime(ImeEvent::Preedit { text, cursor }),
+                    });
+                }
             }
             _ => {}
         }
