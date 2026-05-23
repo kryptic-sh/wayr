@@ -11,9 +11,8 @@
 //! The handful of globals we need is small enough to bind directly
 //! without inheriting sctk's design assumptions.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use tracing::{debug, warn};
 use wayland_client::globals::{Global, GlobalListContents, registry_queue_init};
@@ -228,7 +227,7 @@ pub(crate) struct LayerSurfaceState {
 
 /// Per-toplevel state mutated by dispatch handlers and observed by
 /// the [`crate::Toplevel`] public methods. Shared between the two via
-/// an `Rc<RefCell<_>>`.
+/// an `Arc<Mutex<_>>`.
 #[derive(Debug, Default)]
 pub(crate) struct ToplevelState {
     /// Current logical size as last committed by configure ack. Zero
@@ -287,7 +286,7 @@ pub(crate) struct ToplevelState {
 /// `zwp_text_input_v3` is a single object per seat that follows
 /// keyboard focus (via its own `enter`/`leave` events). Each
 /// `Toplevel` / `LayerSurface` gets a [`crate::Ime`] accessor that
-/// shares this state via `Rc<RefCell<_>>`.
+/// shares this state via `Arc<Mutex<_>>`.
 #[cfg(feature = "text-input")]
 #[derive(Default)]
 pub(crate) struct TextInputState {
@@ -397,12 +396,12 @@ pub(crate) struct State {
     /// Per-toplevel state. `SurfaceId` is the lookup key — the
     /// `XdgSurface` and `XdgToplevel` proxies are bound with the
     /// `SurfaceId` as their user-data so dispatch handlers can find
-    /// the matching `Rc<RefCell<ToplevelState>>`.
-    pub(crate) toplevels: HashMap<SurfaceId, Rc<RefCell<ToplevelState>>>,
+    /// the matching `Arc<Mutex<ToplevelState>>`.
+    pub(crate) toplevels: HashMap<SurfaceId, Arc<Mutex<ToplevelState>>>,
 
     /// Per-layer-surface state.
     #[cfg(feature = "layer-shell")]
-    pub(crate) layer_surfaces: HashMap<SurfaceId, Rc<RefCell<LayerSurfaceState>>>,
+    pub(crate) layer_surfaces: HashMap<SurfaceId, Arc<Mutex<LayerSurfaceState>>>,
 
     /// Lookup from `wl_surface` to `SurfaceId`. Pointer / keyboard
     /// dispatch handlers receive a `&WlSurface` and need the matching
@@ -1225,13 +1224,13 @@ fn recompute_scale_for_outputs(state: &mut State, oid: OutputId) {
     let toplevel_ids: Vec<SurfaceId> = state
         .toplevels
         .iter()
-        .filter(|(_, st)| st.borrow().touched_outputs.contains(&oid))
+        .filter(|(_, st)| st.lock().unwrap().touched_outputs.contains(&oid))
         .map(|(id, _)| *id)
         .collect();
     for sid in toplevel_ids {
         let st_rc = state.toplevels[&sid].clone();
-        let new_scale = state.resolved_scale_for_toplevel(&st_rc.borrow());
-        let mut st = st_rc.borrow_mut();
+        let new_scale = state.resolved_scale_for_toplevel(&st_rc.lock().unwrap());
+        let mut st = st_rc.lock().unwrap();
         if (st.scale_factor - new_scale).abs() > f64::EPSILON {
             st.scale_factor = new_scale;
             let sz = st.current_size;
@@ -1250,13 +1249,13 @@ fn recompute_scale_for_outputs(state: &mut State, oid: OutputId) {
         let ls_ids: Vec<SurfaceId> = state
             .layer_surfaces
             .iter()
-            .filter(|(_, st)| st.borrow().touched_outputs.contains(&oid))
+            .filter(|(_, st)| st.lock().unwrap().touched_outputs.contains(&oid))
             .map(|(id, _)| *id)
             .collect();
         for sid in ls_ids {
             let st_rc = state.layer_surfaces[&sid].clone();
-            let new_scale = state.resolved_scale_for_layer(&st_rc.borrow());
-            let mut st = st_rc.borrow_mut();
+            let new_scale = state.resolved_scale_for_layer(&st_rc.lock().unwrap());
+            let mut st = st_rc.lock().unwrap();
             if (st.scale_factor - new_scale).abs() > f64::EPSILON {
                 st.scale_factor = new_scale;
                 let sz = st.current_size;
@@ -1345,15 +1344,15 @@ impl Dispatch<WlSurface, SurfaceId> for State {
 fn update_touched_outputs(state: &mut State, surface_id: SurfaceId, oid: OutputId, enter: bool) {
     if let Some(st_rc) = state.toplevels.get(&surface_id).cloned() {
         {
-            let mut st = st_rc.borrow_mut();
+            let mut st = st_rc.lock().unwrap();
             if enter {
                 st.touched_outputs.insert(oid);
             } else {
                 st.touched_outputs.remove(&oid);
             }
         }
-        let new_scale = state.resolved_scale_for_toplevel(&st_rc.borrow());
-        let mut st = st_rc.borrow_mut();
+        let new_scale = state.resolved_scale_for_toplevel(&st_rc.lock().unwrap());
+        let mut st = st_rc.lock().unwrap();
         if (st.scale_factor - new_scale).abs() > f64::EPSILON {
             st.scale_factor = new_scale;
             let sz = st.current_size;
@@ -1375,15 +1374,15 @@ fn update_touched_outputs(state: &mut State, surface_id: SurfaceId, oid: OutputI
     #[cfg(feature = "layer-shell")]
     if let Some(st_rc) = state.layer_surfaces.get(&surface_id).cloned() {
         {
-            let mut st = st_rc.borrow_mut();
+            let mut st = st_rc.lock().unwrap();
             if enter {
                 st.touched_outputs.insert(oid);
             } else {
                 st.touched_outputs.remove(&oid);
             }
         }
-        let new_scale = state.resolved_scale_for_layer(&st_rc.borrow());
-        let mut st = st_rc.borrow_mut();
+        let new_scale = state.resolved_scale_for_layer(&st_rc.lock().unwrap());
+        let mut st = st_rc.lock().unwrap();
         if (st.scale_factor - new_scale).abs() > f64::EPSILON {
             st.scale_factor = new_scale;
             let sz = st.current_size;
@@ -1415,7 +1414,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
             // size landed via xdg_toplevel.configure earlier in the
             // same dispatch round.
             if let Some(tl_state_rc) = state.toplevels.get(surface_id) {
-                let mut tl_state = tl_state_rc.borrow_mut();
+                let mut tl_state = tl_state_rc.lock().unwrap();
                 // Ack immediately. wl_surface.commit happens at the
                 // end of dispatch in the toplevel.commit() path.
                 xdg_surface.ack_configure(serial);
@@ -1484,7 +1483,7 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                 states,
             } => {
                 if let Some(tl_state_rc) = state.toplevels.get(surface_id) {
-                    let mut tl_state = tl_state_rc.borrow_mut();
+                    let mut tl_state = tl_state_rc.lock().unwrap();
 
                     // width / height of 0 = compositor leaves the
                     // size up to us; honour the consumer's preferred
@@ -1697,7 +1696,7 @@ impl
                 height,
             } => {
                 if let Some(ls_state_rc) = state.layer_surfaces.get(surface_id) {
-                    let mut ls_state = ls_state_rc.borrow_mut();
+                    let mut ls_state = ls_state_rc.lock().unwrap();
                     let w = if width > 0 {
                         width
                     } else if ls_state.current_size.width > 0 {
@@ -1759,7 +1758,7 @@ impl
             }
             LsEvent::Closed => {
                 if let Some(ls_state_rc) = state.layer_surfaces.get(surface_id) {
-                    ls_state_rc.borrow_mut().closed = true;
+                    ls_state_rc.lock().unwrap().closed = true;
                 }
                 state.pending_events.push(Event::WindowEvent {
                     surface_id: *surface_id,
@@ -1888,7 +1887,7 @@ impl Dispatch<WpFractionalScaleV1, SurfaceId> for State {
             // to f64 on every recompute so we keep the wire fidelity.
             let new_scale = scale as f64 / 120.0;
             if let Some(st_rc) = state.toplevels.get(surface_id).cloned() {
-                let mut st = st_rc.borrow_mut();
+                let mut st = st_rc.lock().unwrap();
                 st.fractional_scale_120 = Some(scale);
                 if (st.scale_factor - new_scale).abs() > f64::EPSILON {
                     st.scale_factor = new_scale;
@@ -1906,7 +1905,7 @@ impl Dispatch<WpFractionalScaleV1, SurfaceId> for State {
             }
             #[cfg(feature = "layer-shell")]
             if let Some(st_rc) = state.layer_surfaces.get(surface_id).cloned() {
-                let mut st = st_rc.borrow_mut();
+                let mut st = st_rc.lock().unwrap();
                 st.fractional_scale_120 = Some(scale);
                 if (st.scale_factor - new_scale).abs() > f64::EPSILON {
                     st.scale_factor = new_scale;

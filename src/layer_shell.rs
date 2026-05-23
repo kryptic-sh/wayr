@@ -3,8 +3,7 @@
 //! Primary consumer: pikr (anchored picker / dmenu replacement).
 //! Gated behind the `layer-shell` feature.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use bitflags::bitflags;
 use wayland_client::Proxy;
@@ -123,7 +122,13 @@ pub struct LayerSurface {
     pub(crate) id: SurfaceId,
     pub(crate) wl_surface: WlSurface,
     pub(crate) layer_surface: ZwlrLayerSurfaceV1,
-    pub(crate) state: Rc<RefCell<LayerSurfaceState>>,
+    /// Wayland-client `Connection` clone (Arc internally). See
+    /// [`crate::Toplevel::wl_connection`] for rationale — keeps the
+    /// socket alive across `Drop` and lets [`HasDisplayHandle`] be
+    /// implemented so `Arc<LayerSurface>` satisfies wgpu's
+    /// `SurfaceTarget::Window` bound.
+    pub(crate) wl_connection: wayland_client::Connection,
+    pub(crate) state: Arc<Mutex<LayerSurfaceState>>,
     /// Per-surface `wp_fractional_scale_v1` — see [`crate::Toplevel`]'s
     /// field of the same name.
     #[cfg(feature = "fractional-scale")]
@@ -184,7 +189,7 @@ impl LayerSurface {
     /// size given the active scale factor. See
     /// [`crate::Toplevel::physical_size`].
     pub fn physical_size(&self) -> Size {
-        let st = self.state.borrow();
+        let st = self.state.lock().unwrap();
         let s = st.scale_factor.max(1.0);
         Size::new(
             (st.current_size.width as f64 * s).ceil() as u32,
@@ -224,17 +229,17 @@ impl Surface for LayerSurface {
     }
 
     fn size(&self) -> Size {
-        self.state.borrow().current_size
+        self.state.lock().unwrap().current_size
     }
 
     fn scale_factor(&self) -> f64 {
-        self.state.borrow().scale_factor
+        self.state.lock().unwrap().scale_factor
     }
 
     fn request_redraw(&self) {
         // Flag for redraw on the next run-loop iteration; see
         // [`crate::Toplevel::request_redraw`] for the full semantics.
-        self.state.borrow_mut().needs_redraw = true;
+        self.state.lock().unwrap().needs_redraw = true;
     }
 
     fn raw_window_handle(&self) -> RawWindowHandlePlaceholder {
@@ -266,6 +271,33 @@ impl raw_window_handle::HasWindowHandle for LayerSurface {
         })
     }
 }
+
+impl raw_window_handle::HasDisplayHandle for LayerSurface {
+    fn display_handle(
+        &self,
+    ) -> std::result::Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+    {
+        let display = self.wl_connection.display();
+        let id = display.id();
+        let raw = id.as_ptr();
+        let ptr = std::ptr::NonNull::new(raw.cast::<std::ffi::c_void>())
+            .ok_or(raw_window_handle::HandleError::Unavailable)?;
+        let handle = raw_window_handle::WaylandDisplayHandle::new(ptr);
+        // SAFETY: see Toplevel's HasDisplayHandle impl.
+        Ok(unsafe {
+            raw_window_handle::DisplayHandle::borrow_raw(
+                raw_window_handle::RawDisplayHandle::Wayland(handle),
+            )
+        })
+    }
+}
+
+// Send + Sync + 'static for wgpu's SurfaceTarget::Window bound; see
+// the matching assertion in toplevel.rs.
+const _: fn() = || {
+    fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+    assert_send_sync_static::<LayerSurface>();
+};
 
 /// Builder for [`LayerSurface`].
 #[derive(Debug, Default)]
@@ -379,7 +411,7 @@ impl LayerSurfaceBuilder {
             .as_ref()
             .map(|v| v.get_viewport(&wl_surface, &qh, ()));
 
-        let state = Rc::new(RefCell::new(LayerSurfaceState {
+        let state = Arc::new(Mutex::new(LayerSurfaceState {
             current_size: Size::default(),
             preferred_size: size,
             scale_factor: 1.0,
@@ -395,7 +427,7 @@ impl LayerSurfaceBuilder {
         event_loop
             .state
             .layer_surfaces
-            .insert(surface_id, Rc::clone(&state));
+            .insert(surface_id, Arc::clone(&state));
         event_loop
             .state
             .surface_id_by_wl
@@ -407,6 +439,7 @@ impl LayerSurfaceBuilder {
             id: surface_id,
             wl_surface,
             layer_surface,
+            wl_connection: event_loop.wl_connection().clone(),
             state,
             #[cfg(feature = "fractional-scale")]
             fractional_scale,

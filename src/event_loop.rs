@@ -261,7 +261,7 @@ impl<T> EventLoop<T> {
         // (both live on `State`).
         let mut to_emit: Vec<crate::SurfaceId> = Vec::new();
         for (sid, st_rc) in self.state.toplevels.iter() {
-            let mut st = st_rc.borrow_mut();
+            let mut st = st_rc.lock().unwrap();
             if st.needs_redraw {
                 st.needs_redraw = false;
                 to_emit.push(*sid);
@@ -269,7 +269,7 @@ impl<T> EventLoop<T> {
         }
         #[cfg(feature = "layer-shell")]
         for (sid, st_rc) in self.state.layer_surfaces.iter() {
-            let mut st = st_rc.borrow_mut();
+            let mut st = st_rc.lock().unwrap();
             if st.needs_redraw {
                 st.needs_redraw = false;
                 to_emit.push(*sid);

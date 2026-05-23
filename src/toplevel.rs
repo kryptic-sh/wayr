@@ -1,7 +1,6 @@
 //! Top-level (`xdg_toplevel`) window surface.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use wayland_client::Proxy;
 use wayland_client::protocol::wl_surface::WlSurface;
@@ -24,7 +23,20 @@ pub struct Toplevel {
     pub(crate) wl_surface: WlSurface,
     pub(crate) xdg_surface: XdgSurface,
     pub(crate) xdg_toplevel: XdgToplevel,
-    pub(crate) state: Rc<RefCell<ToplevelState>>,
+    /// Clone of the wayland-client `Connection` from the event loop.
+    /// Cheap (Arc internally). Held here for two reasons:
+    /// 1. Lets [`HasDisplayHandle`] be implemented on `Toplevel`, so
+    ///    `Arc<Toplevel>` satisfies wgpu's `SurfaceTarget::Window`
+    ///    bound (consumers can pass `Arc<Toplevel>` to
+    ///    `instance.create_surface(...)` instead of the unsafe raw
+    ///    handle path — fixes a teardown SIGSEGV in buffr).
+    /// 2. Keeps the wayland socket alive across `Toplevel::drop` so
+    ///    the `xdg_toplevel.destroy()` / `xdg_surface.destroy()` /
+    ///    `wl_surface.destroy()` requests in our `Drop` impl reach
+    ///    the compositor even after the `EventLoop`'s own
+    ///    `Connection` ref has been released.
+    pub(crate) wl_connection: wayland_client::Connection,
+    pub(crate) state: Arc<Mutex<ToplevelState>>,
     /// Per-surface `wp_fractional_scale_v1` listener — present only
     /// when the `fractional-scale` feature is on and the compositor
     /// advertises the manager. Destroyed in `Drop`.
@@ -76,7 +88,7 @@ impl Toplevel {
         // exists for symmetry / consumer ergonomics — it just sets
         // the `closed` flag so `EventLoop::run_app` knows to exit if
         // no other surfaces are alive.
-        self.state.borrow_mut().closed = true;
+        self.state.lock().unwrap().closed = true;
     }
 
     /// Access the raw `wl_surface` pointer for FFI consumers (e.g.
@@ -98,7 +110,7 @@ impl Toplevel {
     /// physical resolution, then let the compositor reverse-scale via
     /// the attached `wp_viewport` to the logical surface size.
     pub fn physical_size(&self) -> Size {
-        let st = self.state.borrow();
+        let st = self.state.lock().unwrap();
         let s = st.scale_factor.max(1.0);
         Size::new(
             (st.current_size.width as f64 * s).ceil() as u32,
@@ -181,11 +193,11 @@ impl Surface for Toplevel {
     }
 
     fn size(&self) -> Size {
-        self.state.borrow().current_size
+        self.state.lock().unwrap().current_size
     }
 
     fn scale_factor(&self) -> f64 {
-        self.state.borrow().scale_factor
+        self.state.lock().unwrap().scale_factor
     }
 
     fn request_redraw(&self) {
@@ -198,7 +210,7 @@ impl Surface for Toplevel {
         // path is sufficient for consumers that want a
         // synchronously-driven repaint (e.g. buffr's
         // input → request_redraw → paint flow).
-        self.state.borrow_mut().needs_redraw = true;
+        self.state.lock().unwrap().needs_redraw = true;
     }
 
     fn raw_window_handle(&self) -> RawWindowHandlePlaceholder {
@@ -227,6 +239,37 @@ impl raw_window_handle::HasWindowHandle for Toplevel {
         })
     }
 }
+
+impl raw_window_handle::HasDisplayHandle for Toplevel {
+    fn display_handle(
+        &self,
+    ) -> std::result::Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+    {
+        let display = self.wl_connection.display();
+        let id = display.id();
+        let raw = id.as_ptr();
+        let ptr = std::ptr::NonNull::new(raw.cast::<std::ffi::c_void>())
+            .ok_or(raw_window_handle::HandleError::Unavailable)?;
+        let handle = raw_window_handle::WaylandDisplayHandle::new(ptr);
+        // SAFETY: the handle borrows `self`, and `self.wl_connection`
+        // is an Arc-cloned wayland-client Connection — the wl_display
+        // it owns outlives `self` (the Connection's Arc keeps it alive
+        // even after the parent EventLoop drops its own ref).
+        Ok(unsafe {
+            raw_window_handle::DisplayHandle::borrow_raw(
+                raw_window_handle::RawDisplayHandle::Wayland(handle),
+            )
+        })
+    }
+}
+
+// Compile-time guarantee that `Toplevel` (and therefore
+// `Arc<Toplevel>`) satisfies wgpu's `SurfaceTarget::Window` bound
+// (`HasWindowHandle + HasDisplayHandle + Send + Sync + 'static`).
+const _: fn() = || {
+    fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+    assert_send_sync_static::<Toplevel>();
+};
 
 /// Internal helper: extract a `NonNull<c_void>` pointer to the C
 /// `wl_proxy*` for a wayland-client proxy. Returns `None` if the
@@ -347,7 +390,7 @@ impl ToplevelBuilder {
 
         // Register state map entry before the first commit so the
         // configure dispatch can find it.
-        let state = Rc::new(RefCell::new(ToplevelState {
+        let state = Arc::new(Mutex::new(ToplevelState {
             current_size: Size::default(),
             preferred_size: initial_size,
             pending_ack: None,
@@ -365,7 +408,7 @@ impl ToplevelBuilder {
         event_loop
             .state
             .toplevels
-            .insert(surface_id, Rc::clone(&state));
+            .insert(surface_id, Arc::clone(&state));
         event_loop
             .state
             .surface_id_by_wl
@@ -379,6 +422,7 @@ impl ToplevelBuilder {
             wl_surface,
             xdg_surface,
             xdg_toplevel,
+            wl_connection: event_loop.wl_connection().clone(),
             state,
             #[cfg(feature = "fractional-scale")]
             fractional_scale,

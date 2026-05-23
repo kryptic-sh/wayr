@@ -8,6 +8,33 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-05-23
+
+### Changed
+
+- `Toplevel` and `LayerSurface` are now `Send + Sync + 'static`. Internal shared
+  state moved from `Rc<RefCell<_>>` to `Arc<Mutex<_>>` (no contention in
+  practice — wayr dispatch runs single-threaded; the mutex is
+  cheap-uncontended), and each surface now holds its own cheap-clone of the
+  wayland-client `Connection` to keep the socket alive across `Drop` and to
+  satisfy [`HasDisplayHandle`].
+
+### Added
+
+- `HasDisplayHandle` impl on `Toplevel` and `LayerSurface`. Combined with the
+  existing `HasWindowHandle` impl and the new `Send + Sync + 'static` guarantee,
+  `Arc<Toplevel>` and `Arc<LayerSurface>` now satisfy wgpu's
+  `SurfaceTarget::Window` bound — consumers can call
+  `instance.create_surface(arc_toplevel)` on the safe path instead of
+  `create_surface_unsafe` with raw pointers. wgpu Surface holds an Arc keeping
+  the source alive across its own drop, so Wayland teardown ordering is correct
+  (no late-drop `wl_surface.destroy()` racing with wgpu's Vulkan cleanup — a
+  buffr shutdown SIGSEGV diagnosed against 0.1.3).
+- Compile-time assertions on `Toplevel` + `LayerSurface` that they satisfy
+  `Send + Sync + 'static`.
+
+[0.1.4]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.4
+
 ## [0.1.3] - 2026-05-23
 
 ### Fixed
@@ -57,7 +84,7 @@ and this project adheres to
   queued for a future release; this immediate path is sufficient for the
   consumer that needed it.
 
-[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.4...HEAD
 [0.1.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.1
 
 ## [0.1.0] - 2026-05-23
