@@ -29,6 +29,7 @@ use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::protocol::wl_seat::{Capability, Event as WlSeatEvent, WlSeat};
 use wayland_client::protocol::wl_shm::WlShm;
 use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
+use wayland_client::protocol::wl_subsurface::WlSubsurface;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection as WlConnection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::xdg_surface::{Event as XdgSurfaceEvent, XdgSurface};
@@ -406,6 +407,19 @@ impl Dispatch<WlSubcompositor, ()> for State {
         _: &WlConnection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<WlSubsurface, SurfaceId> for State {
+    fn event(
+        _: &mut Self,
+        _: &WlSubsurface,
+        _: <WlSubsurface as wayland_client::Proxy>::Event,
+        _: &SurfaceId,
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        // wl_subsurface has no events in the protocol.
     }
 }
 
