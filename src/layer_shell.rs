@@ -232,9 +232,9 @@ impl Surface for LayerSurface {
     }
 
     fn request_redraw(&self) {
-        // Same caveat as Toplevel: frame-callback driven redraw
-        // lands in a Phase 0 follow-up. v0.1 fires RedrawRequested
-        // synthetically from the configure ack path.
+        // Flag for redraw on the next run-loop iteration; see
+        // [`crate::Toplevel::request_redraw`] for the full semantics.
+        self.state.borrow_mut().needs_redraw = true;
     }
 
     fn raw_window_handle(&self) -> RawWindowHandlePlaceholder {
@@ -383,6 +383,7 @@ impl LayerSurfaceBuilder {
             current_size: Size::default(),
             preferred_size: size,
             scale_factor: 1.0,
+            needs_redraw: false,
             fractional_scale_120: None,
             touched_outputs: Default::default(),
             closed: false,

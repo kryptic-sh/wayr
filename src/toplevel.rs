@@ -189,12 +189,16 @@ impl Surface for Toplevel {
     }
 
     fn request_redraw(&self) {
-        // Schedule a frame callback. The compositor delivers a
-        // wl_callback.done event which the dispatch handler converts
-        // into a WindowEvent::RedrawRequested. v0.1 fires
-        // RedrawRequested synthetically from the configure ack path,
-        // so this is a no-op for now; #5/#7 wiring of frame callbacks
-        // lands in a follow-up.
+        // Flag the surface for redraw on the next run-loop iteration.
+        // The run_app loop synthesizes a single
+        // `WindowEvent::RedrawRequested` per surface per iteration even
+        // if `request_redraw` was called multiple times — matching
+        // winit's coalescing semantics. wl_surface.frame() compositor-
+        // paced redraws are queued for a future release; this immediate
+        // path is sufficient for consumers that want a
+        // synchronously-driven repaint (e.g. buffr's
+        // input → request_redraw → paint flow).
+        self.state.borrow_mut().needs_redraw = true;
     }
 
     fn raw_window_handle(&self) -> RawWindowHandlePlaceholder {
@@ -350,6 +354,7 @@ impl ToplevelBuilder {
             closed: false,
             activated: false,
             scale_factor: 1.0,
+            needs_redraw: false,
             fractional_scale_120: None,
             touched_outputs: Default::default(),
             #[cfg(feature = "fractional-scale")]

@@ -8,6 +8,23 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-23
+
+### Fixed
+
+- `Surface::request_redraw` was a no-op in v0.1.0. The doc-stub comment promised
+  a synthetic `RedrawRequested` would arrive, but the implementation didn't
+  queue one — consumers relying on `request_redraw` to drive paints (buffr's
+  chrome flow) saw frozen UI between configures. Fixed with a `needs_redraw`
+  flag on shared surface state, drained by the run loop into one
+  `WindowEvent::RedrawRequested` per surface per iteration (matching winit's
+  coalescing semantics). Real `wl_surface.frame()` compositor-paced redraws stay
+  queued for a future release; this immediate path is sufficient for the
+  consumer that needed it.
+
+[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.1
+
 ## [0.1.0] - 2026-05-23
 
 First public release. Wayland-first windowing toolkit for Rust; Linux-only by
@@ -75,5 +92,4 @@ design.
   [`hjkl-clipboard`](https://crates.io/crates/hjkl-clipboard) instead.
 - Anything non-Wayland. No X11, macOS, Windows, mobile, or web.
 
-[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.0

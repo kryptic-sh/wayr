@@ -201,6 +201,9 @@ pub(crate) struct LayerSurfaceState {
     /// Effective scale factor — composed from (`fractional_scale_120 /
     /// 120` if present) or `max(touched_outputs.scale)` otherwise.
     pub(crate) scale_factor: f64,
+    /// Consumer called `LayerSurface::request_redraw()` and hasn't been
+    /// served yet. See [`ToplevelState::needs_redraw`].
+    pub(crate) needs_redraw: bool,
     /// Last `preferred_scale` from `wp_fractional_scale_v1` (in 1/120
     /// units). `None` until the compositor sends one OR the
     /// `fractional-scale` feature is off.
@@ -241,6 +244,11 @@ pub(crate) struct ToplevelState {
     /// Effective scale factor (composed: fractional if available,
     /// otherwise `max(touched_outputs.scale)`).
     pub(crate) scale_factor: f64,
+    /// Consumer called `Toplevel::request_redraw()` and hasn't been
+    /// served yet. The run loop drains this into a synthetic
+    /// `WindowEvent::RedrawRequested` once per iteration (coalescing
+    /// repeat requests within a tick), matching winit's semantics.
+    pub(crate) needs_redraw: bool,
     /// Last `preferred_scale` from `wp_fractional_scale_v1` (in 1/120
     /// units). `None` until the compositor sends one.
     pub(crate) fractional_scale_120: Option<u32>,

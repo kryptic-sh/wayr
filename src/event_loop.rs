@@ -202,10 +202,23 @@ impl<T> EventLoop<T> {
                 tracing::warn!(error = %err, "wayland queue flush failed");
             }
 
+            // Drain any `request_redraw()` flags set during the
+            // previous iteration's `window_event` / `about_to_wait`
+            // callbacks — synthesize one `RedrawRequested` per
+            // flagged surface, then clear the flags. Run before
+            // `blocking_pump` so a freshly-flagged redraw doesn't
+            // wait the full 50ms when no socket events are arriving.
+            self.drain_redraw_requests();
+
             // Blocking pump: wait for incoming socket data or user
             // events. 50ms cap so user-event wakeups don't sleep
             // forever. Bigger budgets are a post-MVP optimisation
             // (eventfd-style wake or calloop integration).
+            //
+            // If `drain_redraw_requests` queued events, blocking_pump
+            // returns immediately (its first action checks
+            // `pending_events.is_empty()`), so request_redraw → paint
+            // has the same iteration latency as winit's path.
             self.blocking_pump(Duration::from_millis(50));
 
             // Drain whatever the dispatch produced. `std::mem::take`
@@ -235,6 +248,38 @@ impl<T> EventLoop<T> {
             // Fire AboutToWait so consumers can request redraws +
             // deferred work just before sleep.
             app.about_to_wait(&mut self);
+        }
+    }
+
+    /// For each surface whose `needs_redraw` flag is set, push a
+    /// synthetic `WindowEvent::RedrawRequested` into the event queue
+    /// and clear the flag. Coalesces multiple `request_redraw()` calls
+    /// within a single iteration into one event.
+    fn drain_redraw_requests(&mut self) {
+        // Collect the IDs first so we don't hold a borrow on
+        // `self.state.toplevels` while we push into pending_events
+        // (both live on `State`).
+        let mut to_emit: Vec<crate::SurfaceId> = Vec::new();
+        for (sid, st_rc) in self.state.toplevels.iter() {
+            let mut st = st_rc.borrow_mut();
+            if st.needs_redraw {
+                st.needs_redraw = false;
+                to_emit.push(*sid);
+            }
+        }
+        #[cfg(feature = "layer-shell")]
+        for (sid, st_rc) in self.state.layer_surfaces.iter() {
+            let mut st = st_rc.borrow_mut();
+            if st.needs_redraw {
+                st.needs_redraw = false;
+                to_emit.push(*sid);
+            }
+        }
+        for sid in to_emit {
+            self.state.pending_events.push(Event::WindowEvent {
+                surface_id: sid,
+                event: WindowEvent::RedrawRequested,
+            });
         }
     }
 
