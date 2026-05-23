@@ -19,12 +19,15 @@ use tracing::{debug, warn};
 use wayland_client::globals::{Global, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_output::WlOutput;
+use wayland_client::protocol::wl_pointer::{
+    self, ButtonState as WlButtonState, Event as WlPointerEvent, WlPointer,
+};
 use wayland_client::protocol::wl_registry::WlRegistry;
-use wayland_client::protocol::wl_seat::WlSeat;
+use wayland_client::protocol::wl_seat::{Capability, Event as WlSeatEvent, WlSeat};
 use wayland_client::protocol::wl_shm::WlShm;
 use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_client::protocol::wl_surface::WlSurface;
-use wayland_client::{Connection as WlConnection, Dispatch, EventQueue, QueueHandle};
+use wayland_client::{Connection as WlConnection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::xdg_surface::{Event as XdgSurfaceEvent, XdgSurface};
 use wayland_protocols::xdg::shell::client::xdg_toplevel::{
     Event as XdgToplevelEvent, State as XdgToplevelStateFlag, XdgToplevel,
@@ -33,7 +36,11 @@ use wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase;
 
 use crate::error::{Error, Result};
 use crate::event::{Event, WindowEvent};
-use crate::geometry::Size;
+use crate::geometry::{Position, Size};
+use crate::keyboard::Modifiers;
+use crate::pointer::{
+    AxisDirection, AxisSource, PointerButton, PointerButtonState, PointerPosition, ScrollEvent,
+};
 use crate::surface::SurfaceId;
 
 /// Owning handle for the live Wayland connection + bound globals.
@@ -120,6 +127,27 @@ pub(crate) struct ToplevelState {
     pub(crate) scale_factor: f64,
 }
 
+/// Per-pointer focus + accumulator state. v0.1 supports a single seat
+/// pointer; multi-seat / multi-pointer is post-MVP.
+#[derive(Default)]
+pub(crate) struct PointerState {
+    /// The `wl_pointer` proxy, when the seat advertised pointer
+    /// capability. `None` until capabilities arrive (or if the seat
+    /// has no pointer).
+    pub(crate) wl_pointer: Option<WlPointer>,
+    /// Surface the pointer is currently over. `None` between
+    /// enter/leave pairs.
+    pub(crate) focused_surface: Option<SurfaceId>,
+    /// Accumulated axis state since the last wl_pointer.frame. v0.1
+    /// flushes on every `frame` event; finer batching is post-MVP.
+    pub(crate) axis_vertical: f64,
+    pub(crate) axis_horizontal: f64,
+    pub(crate) axis_discrete_v: i32,
+    pub(crate) axis_discrete_h: i32,
+    pub(crate) axis_source: Option<AxisSource>,
+    pub(crate) axis_pending: bool,
+}
+
 /// Dispatch state. Threaded through every wayland-client `Dispatch`
 /// impl in this crate.
 #[derive(Default)]
@@ -136,6 +164,14 @@ pub(crate) struct State {
     /// `SurfaceId` as their user-data so dispatch handlers can find
     /// the matching `Rc<RefCell<ToplevelState>>`.
     pub(crate) toplevels: HashMap<SurfaceId, Rc<RefCell<ToplevelState>>>,
+
+    /// Lookup from `wl_surface` to `SurfaceId`. Pointer / keyboard
+    /// dispatch handlers receive a `&WlSurface` and need the matching
+    /// `SurfaceId` to route the event.
+    pub(crate) surface_id_by_wl: HashMap<WlSurface, SurfaceId>,
+
+    /// Pointer state.
+    pub(crate) pointer: PointerState,
 
     /// Monotonic `SurfaceId` counter. Wraps at u64::MAX (effectively
     /// never).
@@ -338,16 +374,210 @@ impl Dispatch<WlShm, ()> for State {
 
 impl Dispatch<WlSeat, ()> for State {
     fn event(
-        _: &mut Self,
-        _: &WlSeat,
-        _: <WlSeat as wayland_client::Proxy>::Event,
+        state: &mut Self,
+        seat: &WlSeat,
+        event: <WlSeat as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let WlSeatEvent::Capabilities {
+            capabilities: WEnum::Value(caps),
+        } = event
+            && caps.contains(Capability::Pointer)
+            && state.pointer.wl_pointer.is_none()
+        {
+            // Spawn a wl_pointer child of this seat. v0.1 supports
+            // one pointer per loop.
+            state.pointer.wl_pointer = Some(seat.get_pointer(qh, ()));
+        }
+        // Capability::Keyboard handled in #10.
+        // Capability::Touch handled in #16.
+    }
+}
+
+impl Dispatch<WlPointer, ()> for State {
+    fn event(
+        state: &mut Self,
+        _pointer: &WlPointer,
+        event: <WlPointer as wayland_client::Proxy>::Event,
         _: &(),
         _: &WlConnection,
         _: &QueueHandle<Self>,
     ) {
-        // Capabilities + name. #8 (pointer) + #10 (keyboard) attach
-        // dispatch handlers that create wl_pointer / wl_keyboard
-        // children based on the advertised capabilities.
+        match event {
+            WlPointerEvent::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                if let Some(&id) = state.surface_id_by_wl.get(&surface) {
+                    state.pointer.focused_surface = Some(id);
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: id,
+                        event: WindowEvent::PointerEntered {
+                            position: PointerPosition::from(Position::new(
+                                surface_x as i32,
+                                surface_y as i32,
+                            )),
+                        },
+                    });
+                }
+            }
+            WlPointerEvent::Leave { surface, .. } => {
+                if let Some(&id) = state.surface_id_by_wl.get(&surface) {
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: id,
+                        event: WindowEvent::PointerLeft,
+                    });
+                }
+                state.pointer.focused_surface = None;
+            }
+            WlPointerEvent::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                if let Some(id) = state.pointer.focused_surface {
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: id,
+                        event: WindowEvent::PointerMoved {
+                            position: PointerPosition::from(Position::new(
+                                surface_x as i32,
+                                surface_y as i32,
+                            )),
+                        },
+                    });
+                }
+            }
+            WlPointerEvent::Button {
+                button,
+                state: btn_state,
+                ..
+            } => {
+                if let Some(id) = state.pointer.focused_surface {
+                    let pb = evdev_to_pointer_button(button);
+                    let pbs = match btn_state {
+                        WEnum::Value(WlButtonState::Pressed) => PointerButtonState::Pressed,
+                        WEnum::Value(WlButtonState::Released) => PointerButtonState::Released,
+                        _ => return,
+                    };
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: id,
+                        event: WindowEvent::PointerButton {
+                            button: pb,
+                            state: pbs,
+                            // Keyboard modifier state lives in
+                            // wl_keyboard (Phase 1). v0.1 reports
+                            // empty modifiers; #10 wires the real
+                            // values.
+                            modifiers: Modifiers::default(),
+                        },
+                    });
+                }
+            }
+            WlPointerEvent::Axis { axis, value, .. } => {
+                let axis_dir = match axis {
+                    WEnum::Value(wl_pointer::Axis::VerticalScroll) => AxisDirection::Vertical,
+                    WEnum::Value(wl_pointer::Axis::HorizontalScroll) => AxisDirection::Horizontal,
+                    _ => return,
+                };
+                match axis_dir {
+                    AxisDirection::Vertical => state.pointer.axis_vertical += value,
+                    AxisDirection::Horizontal => state.pointer.axis_horizontal += value,
+                }
+                state.pointer.axis_pending = true;
+            }
+            WlPointerEvent::AxisDiscrete { axis, discrete } => {
+                let axis_dir = match axis {
+                    WEnum::Value(wl_pointer::Axis::VerticalScroll) => AxisDirection::Vertical,
+                    WEnum::Value(wl_pointer::Axis::HorizontalScroll) => AxisDirection::Horizontal,
+                    _ => return,
+                };
+                match axis_dir {
+                    AxisDirection::Vertical => state.pointer.axis_discrete_v += discrete,
+                    AxisDirection::Horizontal => state.pointer.axis_discrete_h += discrete,
+                }
+                state.pointer.axis_pending = true;
+            }
+            WlPointerEvent::AxisSource { axis_source } => {
+                state.pointer.axis_source = match axis_source {
+                    WEnum::Value(wl_pointer::AxisSource::Wheel) => Some(AxisSource::Wheel),
+                    WEnum::Value(wl_pointer::AxisSource::Finger) => Some(AxisSource::Finger),
+                    WEnum::Value(wl_pointer::AxisSource::Continuous) => {
+                        Some(AxisSource::Continuous)
+                    }
+                    WEnum::Value(wl_pointer::AxisSource::WheelTilt) => Some(AxisSource::WheelTilt),
+                    _ => None,
+                };
+            }
+            WlPointerEvent::Frame => {
+                // End of an event sequence. Flush accumulated scroll
+                // into a single ScrollEvent per axis.
+                if !state.pointer.axis_pending {
+                    return;
+                }
+                let id = match state.pointer.focused_surface {
+                    Some(id) => id,
+                    None => {
+                        state.pointer.reset_axis();
+                        return;
+                    }
+                };
+                let source = state.pointer.axis_source.unwrap_or(AxisSource::Wheel);
+                if state.pointer.axis_vertical != 0.0 || state.pointer.axis_discrete_v != 0 {
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: id,
+                        event: WindowEvent::Scroll(ScrollEvent {
+                            axis: AxisDirection::Vertical,
+                            delta: state.pointer.axis_vertical,
+                            discrete_steps: state.pointer.axis_discrete_v,
+                            source,
+                        }),
+                    });
+                }
+                if state.pointer.axis_horizontal != 0.0 || state.pointer.axis_discrete_h != 0 {
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: id,
+                        event: WindowEvent::Scroll(ScrollEvent {
+                            axis: AxisDirection::Horizontal,
+                            delta: state.pointer.axis_horizontal,
+                            discrete_steps: state.pointer.axis_discrete_h,
+                            source,
+                        }),
+                    });
+                }
+                state.pointer.reset_axis();
+            }
+            // AxisStop / AxisRelativeDirection / AxisValue120 are
+            // refinements for high-res scroll. v0.1 ignores; #16
+            // polish will surface value120 for smooth scroll.
+            _ => {}
+        }
+    }
+}
+
+impl PointerState {
+    fn reset_axis(&mut self) {
+        self.axis_vertical = 0.0;
+        self.axis_horizontal = 0.0;
+        self.axis_discrete_v = 0;
+        self.axis_discrete_h = 0;
+        self.axis_source = None;
+        self.axis_pending = false;
+    }
+}
+
+/// Translate an evdev button code to wayr's [`PointerButton`].
+fn evdev_to_pointer_button(code: u32) -> PointerButton {
+    match code {
+        0x110 => PointerButton::Left,
+        0x111 => PointerButton::Right,
+        0x112 => PointerButton::Middle,
+        0x113 => PointerButton::Back,
+        0x114 => PointerButton::Forward,
+        other => PointerButton::Other(other),
     }
 }
 

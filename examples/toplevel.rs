@@ -61,6 +61,23 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused => tracing::info!(?surface_id, "Focused"),
             WindowEvent::Unfocused => tracing::info!(?surface_id, "Unfocused"),
+            WindowEvent::PointerEntered { position } => {
+                tracing::info!(?surface_id, ?position, "PointerEntered");
+            }
+            WindowEvent::PointerLeft => tracing::info!(?surface_id, "PointerLeft"),
+            WindowEvent::PointerMoved { position } => {
+                tracing::debug!(?surface_id, ?position, "PointerMoved");
+            }
+            WindowEvent::PointerButton {
+                button,
+                state,
+                modifiers,
+            } => {
+                tracing::info!(?surface_id, ?button, ?state, ?modifiers, "PointerButton");
+            }
+            WindowEvent::Scroll(scroll) => {
+                tracing::info!(?surface_id, ?scroll, "Scroll");
+            }
             WindowEvent::CloseRequested => {
                 tracing::info!(?surface_id, "CloseRequested — exiting");
                 event_loop.exit();

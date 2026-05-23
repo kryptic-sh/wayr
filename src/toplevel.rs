@@ -258,6 +258,10 @@ impl ToplevelBuilder {
             .state
             .toplevels
             .insert(surface_id, Rc::clone(&state));
+        event_loop
+            .state
+            .surface_id_by_wl
+            .insert(wl_surface.clone(), surface_id);
 
         // Empty commit kicks off the configure cycle.
         wl_surface.commit();
