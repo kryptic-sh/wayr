@@ -25,8 +25,12 @@ cursor-shape = []
 fractional-scale = []
 
 [dependencies]
-# Stays minimal until #4 (connection + registry) lands and pulls in
-# wayland-client + wayland-protocols + calloop + xkbcommon.
+# Used by layer-shell `Anchor` flags and text-input `ContentHint`.
+# Light + zero-deps; carrying it in the API skeleton is cheap.
+bitflags = "2"
+
+# Real protocol deps land with #4 (connection + registry):
+# wayland-client, wayland-protocols, calloop, xkbcommon.
 
 [dev-dependencies]
 # examples/ smoke tests will pull wgpu here once #6 (raw-window-handle)
