@@ -104,6 +104,23 @@ pub(crate) struct Globals {
     >,
 }
 
+/// Per-layer-surface state, parallel to [`ToplevelState`]. Shared
+/// between the [`crate::LayerSurface`] public API and the
+/// `ZwlrLayerSurfaceV1` dispatch handler.
+#[cfg(feature = "layer-shell")]
+#[derive(Debug, Default)]
+pub(crate) struct LayerSurfaceState {
+    /// Current logical size last committed by configure ack.
+    pub(crate) current_size: Size,
+    /// Preferred size from the builder. Used when the compositor's
+    /// configure returns `0` on an axis ("you pick").
+    pub(crate) preferred_size: Size,
+    /// Effective scale factor — defaults to 1.0; wired in #13.
+    pub(crate) scale_factor: f64,
+    /// Closed by compositor.
+    pub(crate) closed: bool,
+}
+
 /// Per-toplevel state mutated by dispatch handlers and observed by
 /// the [`crate::Toplevel`] public methods. Shared between the two via
 /// an `Rc<RefCell<_>>`.
@@ -192,6 +209,10 @@ pub(crate) struct State {
     /// `SurfaceId` as their user-data so dispatch handlers can find
     /// the matching `Rc<RefCell<ToplevelState>>`.
     pub(crate) toplevels: HashMap<SurfaceId, Rc<RefCell<ToplevelState>>>,
+
+    /// Per-layer-surface state.
+    #[cfg(feature = "layer-shell")]
+    pub(crate) layer_surfaces: HashMap<SurfaceId, Rc<RefCell<LayerSurfaceState>>>,
 
     /// Lookup from `wl_surface` to `SurfaceId`. Pointer / keyboard
     /// dispatch handlers receive a `&WlSurface` and need the matching
@@ -977,7 +998,83 @@ impl
         _: &QueueHandle<Self>,
     ) {
         // No events on zwlr_layer_shell_v1 itself; per-surface events
-        // arrive via zwlr_layer_surface_v1 (handled in #11).
+        // arrive via zwlr_layer_surface_v1 (below).
+    }
+}
+
+#[cfg(feature = "layer-shell")]
+impl
+    Dispatch<
+        wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        SurfaceId,
+    > for State
+{
+    fn event(
+        state: &mut Self,
+        layer_surface: &wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        event: <wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1 as wayland_client::Proxy>::Event,
+        surface_id: &SurfaceId,
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Event as LsEvent;
+        match event {
+            LsEvent::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                if let Some(ls_state_rc) = state.layer_surfaces.get(surface_id) {
+                    let mut ls_state = ls_state_rc.borrow_mut();
+                    let w = if width > 0 {
+                        width
+                    } else if ls_state.current_size.width > 0 {
+                        ls_state.current_size.width
+                    } else {
+                        ls_state.preferred_size.width
+                    };
+                    let h = if height > 0 {
+                        height
+                    } else if ls_state.current_size.height > 0 {
+                        ls_state.current_size.height
+                    } else {
+                        ls_state.preferred_size.height
+                    };
+                    ls_state.current_size = Size::new(w, h);
+                    let new_size = ls_state.current_size;
+                    let scale = ls_state.scale_factor;
+                    drop(ls_state);
+
+                    layer_surface.ack_configure(serial);
+
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: *surface_id,
+                        event: WindowEvent::Resized(new_size),
+                    });
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: *surface_id,
+                        event: WindowEvent::ScaleFactorChanged {
+                            new_scale_factor: scale,
+                            suggested_size: new_size,
+                        },
+                    });
+                    state.pending_events.push(Event::WindowEvent {
+                        surface_id: *surface_id,
+                        event: WindowEvent::RedrawRequested,
+                    });
+                }
+            }
+            LsEvent::Closed => {
+                if let Some(ls_state_rc) = state.layer_surfaces.get(surface_id) {
+                    ls_state_rc.borrow_mut().closed = true;
+                }
+                state.pending_events.push(Event::WindowEvent {
+                    surface_id: *surface_id,
+                    event: WindowEvent::CloseRequested,
+                });
+            }
+            _ => {}
+        }
     }
 }
 
