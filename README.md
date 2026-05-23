@@ -28,6 +28,12 @@ Wayland-first windowing toolkit for Rust.
   [`wayland-client`](https://crates.io/crates/wayland-client) or
   [`smithay-client-toolkit`](https://crates.io/crates/smithay-client-toolkit)
   if you need raw protocol access.
+- A clipboard library. Use
+  [`hjkl-clipboard`](https://crates.io/crates/hjkl-clipboard) — it
+  implements `wl_data_device` over a raw Wayland socket (orthogonal
+  to wayr's own connection) and supports text + HTML + RTF +
+  `image/png` MIME types, plus X11 / macOS / Windows / OSC52 fallback
+  for free.
 - Production-ready. Pre-alpha. Track [umbrella issue #1] for the v0.1
   MVP plan.
 

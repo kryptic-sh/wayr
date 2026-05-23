@@ -20,7 +20,11 @@ default = []
 layer-shell = ["dep:wayland-protocols-wlr"]
 subsurface = []
 text-input = []
-clipboard = []
+# `clipboard` feature dropped — use `hjkl-clipboard` crate instead.
+# It implements wl_data_device over a raw Wayland socket
+# (orthogonal to wayr's connection) with text + HTML + RTF +
+# `image/png` MIME support, plus X11 / macOS / Windows / OSC52
+# fallback. No reason to duplicate.
 cursor-shape = []
 fractional-scale = []
 
