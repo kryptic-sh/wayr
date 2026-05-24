@@ -79,6 +79,17 @@ impl Toplevel {
             .set_max_size(s.width as i32, s.height as i32);
     }
 
+    /// Whether the compositor has marked this toplevel as suspended
+    /// (`xdg_toplevel.state.suspended`, xdg-shell v6+). Mirrors the
+    /// latest [`crate::WindowEvent::Occluded`] value — read it from
+    /// `about_to_wait` to decide whether to skip a paint frame.
+    ///
+    /// Always `false` on compositors that only advertise xdg-shell
+    /// v5 or older (they never send the suspended bit).
+    pub fn is_occluded(&self) -> bool {
+        self.state.lock().unwrap().suspended
+    }
+
     /// Programmatically request the compositor close this window
     /// (fires the usual close-window flow). The actual destruction
     /// happens on `Toplevel::drop`.
@@ -470,6 +481,7 @@ impl ToplevelBuilder {
             pending_ack: None,
             closed: false,
             activated: false,
+            suspended: false,
             scale_factor: 1.0,
             last_emitted_size: Size::default(),
             last_emitted_scale: 0.0,

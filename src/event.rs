@@ -78,6 +78,22 @@ pub enum WindowEvent {
     /// Surface lost keyboard focus.
     Unfocused,
 
+    /// Surface occlusion changed.
+    ///
+    /// `true` when the compositor has fully obscured the surface
+    /// (minimized, covered by an opaque window, off-workspace) — the
+    /// consumer should pause idle repaint timers; rendering more pixels
+    /// the user can't see is wasted CPU / GPU / battery.
+    ///
+    /// `false` when the surface becomes visible again — consumer
+    /// should resume its normal paint cadence and may want to
+    /// `request_redraw()` to refresh stale content.
+    ///
+    /// Driven by `xdg_toplevel.state.suspended` (xdg-shell v6+). On
+    /// compositors that only advertise v5 (or older) the event never
+    /// fires; consumers stay in their default "visible" mode.
+    Occluded(bool),
+
     /// Pointer entered the surface.
     PointerEntered {
         /// Initial pointer position.

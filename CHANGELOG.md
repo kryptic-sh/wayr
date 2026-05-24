@@ -8,6 +8,28 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-05-24
+
+### Added
+
+- `WindowEvent::Occluded(bool)` — fired on `xdg_toplevel.state.suspended`
+  transitions (xdg-shell v6+). `true` when the compositor has fully obscured the
+  surface (minimized / off-workspace / opaque-covered), `false` on reappear.
+  Consumers should pause idle repaint while occluded — painting pixels the user
+  can't see is wasted CPU / GPU / battery.
+- `Toplevel::is_occluded()` — synchronous accessor mirroring the latest
+  `Occluded` event value. Useful from `about_to_wait` to decide whether to skip
+  a frame.
+
+### Changed
+
+- `xdg_wm_base` is now bound up to v6 (was v5). `wayland-client`'s
+  `GlobalList::bind` clamps to the compositor's advertised version, so v5
+  sessions keep working unchanged; v6 sessions unlock the new Suspended state
+  behind `WindowEvent::Occluded`.
+
+[0.1.9]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.9
+
 ## [0.1.8] - 2026-05-24
 
 ### Added
@@ -159,7 +181,7 @@ and this project adheres to
   queued for a future release; this immediate path is sufficient for the
   consumer that needed it.
 
-[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.9...HEAD
 [0.1.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.1
 
 ## [0.1.0] - 2026-05-23

@@ -263,6 +263,13 @@ pub(crate) struct ToplevelState {
     /// last configure. v0.1 only surfaces `Focused` / `Unfocused`
     /// (activated bit).
     pub(crate) activated: bool,
+    /// `xdg_toplevel.state.suspended` from the last configure
+    /// (xdg-shell v6+). True when the compositor has fully obscured
+    /// the surface (minimized, occluded by an opaque window, other
+    /// workspace). Drives `WindowEvent::Occluded(bool)` transitions
+    /// and is exposed via `Toplevel::is_occluded()`. Stays `false` on
+    /// v5 compositors that never advertise it.
+    pub(crate) suspended: bool,
     /// Effective scale factor (composed: fractional if available,
     /// otherwise `max(touched_outputs.scale)`).
     pub(crate) scale_factor: f64,
@@ -604,7 +611,12 @@ impl Connection {
             bind_required(&global_list, &qh, "wl_subcompositor", 1)?;
         let shm: WlShm = bind_required(&global_list, &qh, "wl_shm", 1)?;
         let seat: WlSeat = bind_required(&global_list, &qh, "wl_seat", 7)?;
-        let xdg_wm_base: XdgWmBase = bind_required(&global_list, &qh, "xdg_wm_base", 5)?;
+        // v6 adds the `suspended` state — surfaced as
+        // `WindowEvent::Occluded(true)` so consumers can pause idle
+        // repaint when fully obscured. `bind` clamps to whatever the
+        // compositor advertises, so v5 sessions get v5 silently and
+        // Suspended just never fires.
+        let xdg_wm_base: XdgWmBase = bind_required(&global_list, &qh, "xdg_wm_base", 6)?;
 
         // Multi-output: bind all advertised wl_output globals. Each
         // surface tracks which outputs it touches via wl_surface.enter
@@ -1682,11 +1694,33 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                     // source. xdg_toplevel.activated reflects the
                     // "active window" titlebar highlight, which is
                     // related but not identical.
-                    tl_state.activated = states
+                    let mut activated = false;
+                    let mut suspended = false;
+                    for raw in states
                         .chunks_exact(4)
                         .filter_map(|chunk| chunk.try_into().ok().map(u32::from_ne_bytes))
-                        .any(|raw| raw == XdgToplevelStateFlag::Activated as u32);
-                    let _ = states;
+                    {
+                        if raw == XdgToplevelStateFlag::Activated as u32 {
+                            activated = true;
+                        } else if raw == XdgToplevelStateFlag::Suspended as u32 {
+                            suspended = true;
+                        }
+                    }
+                    tl_state.activated = activated;
+                    // Surface Suspended transitions as Occluded so
+                    // consumers can pause their idle-repaint timer (CPU
+                    // / GPU / battery win when the user tabs away). We
+                    // emit only on flip, not on every configure — the
+                    // suspended state survives across the many
+                    // configures the compositor sends for unrelated
+                    // reasons (decoration, tiled-state, …).
+                    if tl_state.suspended != suspended {
+                        tl_state.suspended = suspended;
+                        state.pending_events.push(Event::WindowEvent {
+                            surface_id: *surface_id,
+                            event: WindowEvent::Occluded(suspended),
+                        });
+                    }
                     // The Resized event itself is queued by the
                     // matching XdgSurface::Configure handler (which
                     // runs immediately after this one in the same
