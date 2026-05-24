@@ -8,6 +8,40 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-24
+
+### Removed (BREAKING)
+
+Scope-creep removal. Wayr's purpose is "winit-equivalent surface area, plus the
+`wl_subsurface` embedding that winit can't do." 0.1.10 and 0.1.11 stretched past
+that line; neither addition had a winit analogue. Pulled before the API
+fossilized.
+
+- `presentation-time` feature (`wp_presentation` binding + always-armed
+  `wp_presentation_feedback` chain). Includes:
+  - `WindowEvent::FramePresented(PresentationInfo)` and
+    `WindowEvent::FrameDiscarded`
+  - `Toplevel::last_presented()` and `Toplevel::estimated_next_vblank()`
+  - `PresentationInfo`, `PresentFlags`, `PresentationClock` public types
+- `Toplevel::set_damage(rect)` and `Toplevel::set_damage_full()` (damage
+  tracking pre-commit hooks). Consumers wanting partial-damage compositor blits
+  should call `wl_surface.damage_buffer` directly via the `raw-window-handle`
+  proxy until a real driver demonstrates the need for a wayr-level API.
+
+### Migration
+
+Apps that used these APIs should:
+
+- Replace `Toplevel::estimated_next_vblank()`-based paint pacing with
+  `OutputInfo::refresh_mhz` (unchanged), which is what consumers already had to
+  fall back to when the compositor didn't advertise `wp_presentation`.
+- Drop `Toplevel::set_damage` / `set_damage_full` calls. The compositor's
+  default behaviour (treat the whole surface as damaged on every commit) is what
+  0.1.x consumers got before 0.1.11 shipped — going back to that costs a small
+  compositor blit but is otherwise transparent.
+
+[0.2.0]: https://github.com/kryptic-sh/wayr/releases/tag/v0.2.0
+
 ## [0.1.11] - 2026-05-24
 
 ### Added
@@ -225,7 +259,7 @@ and this project adheres to
   queued for a future release; this immediate path is sufficient for the
   consumer that needed it.
 
-[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.2.0...HEAD
 [0.1.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.1
 
 ## [0.1.0] - 2026-05-23

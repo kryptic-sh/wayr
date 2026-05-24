@@ -1,6 +1,6 @@
 [package]
 name = "wayr"
-version = "0.1.11"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -38,15 +38,6 @@ cursor-shape = ["wayland-protocols/unstable"]
 # `WindowEvent::ScaleFactorChanged` reports the fractional value
 # (rather than just the integer max-output scale).
 fractional-scale = []
-# `wp_presentation` (stable) + per-surface `wp_presentation_feedback`
-# (always-armed rolling). Surfaces `WindowEvent::FramePresented` /
-# `FrameDiscarded` per commit and exposes derived
-# `Toplevel::last_presented()` / `estimated_next_vblank()` accessors
-# so consumers can pace paints to actual hardware vblank instead of
-# the static `wl_output.mode` refresh hint. No commit hook required:
-# wayr keeps one feedback object outstanding per toplevel and
-# re-arms in the destructor event dispatch.
-presentation-time = []
 # `xdg_activation_v1` (stable xdg) — programmatic focus / activation
 # requests so multi-instance apps (buffr's `--new-tab` forwarder) can
 # bring the existing window forward. Activation handshake requires a

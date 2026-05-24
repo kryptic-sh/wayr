@@ -137,28 +137,4 @@ pub enum WindowEvent {
     /// AND the consumer has called `surface.ime().enable()`.
     #[cfg(feature = "text-input")]
     Ime(ImeEvent),
-
-    /// A committed frame was displayed by the compositor. Fired once
-    /// per `wp_presentation_feedback.presented` — i.e. roughly once
-    /// per consumer commit on a healthy 60Hz path. Carries the actual
-    /// hardware-timestamped presentation time and refresh period;
-    /// consumer can use these to schedule the next paint to land just
-    /// before the predicted next vblank (low-latency animation,
-    /// smooth scroll, vsync-aligned wgpu submit).
-    ///
-    /// Only emitted when the `presentation-time` feature is on AND
-    /// the compositor advertises `wp_presentation`. Always-armed: the
-    /// consumer doesn't need to opt in per-frame.
-    #[cfg(feature = "presentation-time")]
-    FramePresented(crate::PresentationInfo),
-
-    /// A committed frame was discarded by the compositor before
-    /// display. Most often: the consumer commit was superseded by a
-    /// later commit before the compositor had a chance to scan it
-    /// out. Also fires on workspace switches mid-flight.
-    ///
-    /// Only emitted when the `presentation-time` feature is on AND
-    /// the compositor advertises `wp_presentation`.
-    #[cfg(feature = "presentation-time")]
-    FrameDiscarded,
 }

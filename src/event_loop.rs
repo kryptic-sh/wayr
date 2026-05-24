@@ -66,8 +66,7 @@ impl<T> EventLoop<T> {
             not(any(
                 feature = "text-input",
                 feature = "cursor-shape",
-                feature = "xdg-activation",
-                feature = "presentation-time"
+                feature = "xdg-activation"
             )),
             allow(unused_mut)
         )]
@@ -100,14 +99,6 @@ impl<T> EventLoop<T> {
         #[cfg(feature = "xdg-activation")]
         {
             state.xdg_activation_manager = connection.globals.xdg_activation.clone();
-        }
-
-        // wp_presentation manager: cloned into state so the feedback
-        // destructor dispatch can re-arm the next feedback object
-        // inline without going back through Connection.
-        #[cfg(feature = "presentation-time")]
-        {
-            state.presentation_manager = connection.globals.presentation.clone();
         }
 
         Ok(Self {

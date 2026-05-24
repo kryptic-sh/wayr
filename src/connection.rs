@@ -81,16 +81,6 @@ use wayland_protocols::xdg::activation::v1::client::xdg_activation_token_v1::{
 #[cfg(feature = "xdg-activation")]
 use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
 
-#[cfg(feature = "presentation-time")]
-use wayland_protocols::wp::presentation_time::client::wp_presentation::{
-    Event as WpPresentationEvent, WpPresentation,
-};
-#[cfg(feature = "presentation-time")]
-use wayland_protocols::wp::presentation_time::client::wp_presentation_feedback::{
-    Event as WpPresentationFeedbackEvent, Kind as WpPresentationFeedbackKind,
-    WpPresentationFeedback,
-};
-
 /// Owning handle for the live Wayland connection + bound globals.
 ///
 /// One per [`crate::EventLoop`]. Dropped on event-loop teardown; the
@@ -176,13 +166,6 @@ pub(crate) struct Globals {
     /// [`crate::Toplevel::request_activation`].
     #[cfg(feature = "xdg-activation")]
     pub(crate) xdg_activation: Option<XdgActivationV1>,
-
-    /// `wp_presentation` — present when the `presentation-time` feature
-    /// is on AND the compositor advertises the global. Drives the
-    /// rolling per-toplevel `wp_presentation_feedback` chain that
-    /// powers `WindowEvent::FramePresented` / `FrameDiscarded`.
-    #[cfg(feature = "presentation-time")]
-    pub(crate) presentation: Option<WpPresentation>,
 }
 
 /// Per-output mirrored state. Populated from the wl_output dispatch
@@ -280,15 +263,6 @@ pub(crate) struct ToplevelState {
     /// last configure. v0.1 only surfaces `Focused` / `Unfocused`
     /// (activated bit).
     pub(crate) activated: bool,
-    /// Latest `Presented` snapshot for this toplevel. Updated by the
-    /// `WpPresentationFeedback` dispatch handler; consumers read it
-    /// via [`crate::Toplevel::last_presented`] /
-    /// [`crate::Toplevel::estimated_next_vblank`]. `None` until the
-    /// compositor presents at least one frame on this surface.
-    /// Compiled out unless the `presentation-time` feature is on.
-    #[cfg(feature = "presentation-time")]
-    pub(crate) last_presented: Option<crate::PresentationInfo>,
-
     /// `xdg_toplevel.state.suspended` from the last configure
     /// (xdg-shell v6+). True when the compositor has fully obscured
     /// the surface (minimized, occluded by an opaque window, other
@@ -551,33 +525,6 @@ pub(crate) struct State {
     /// advertise the global.
     #[cfg(feature = "xdg-activation")]
     pub(crate) xdg_activation_manager: Option<XdgActivationV1>,
-
-    /// Clock domain the compositor uses for `wp_presentation_feedback`
-    /// timestamps (e.g. `CLOCK_MONOTONIC = 1`). `None` until the
-    /// `wp_presentation.clock_id` event arrives, after which all
-    /// `Presented` timestamps share this domain.
-    #[cfg(feature = "presentation-time")]
-    pub(crate) presentation_clock_id: Option<u32>,
-
-    /// Clone of the `wp_presentation` proxy so the feedback dispatch
-    /// handler can re-arm the next feedback object inline. `None`
-    /// when the feature is on but the compositor doesn't advertise.
-    #[cfg(feature = "presentation-time")]
-    pub(crate) presentation_manager: Option<WpPresentation>,
-
-    /// Reverse map from in-flight `wp_presentation_feedback` proxies
-    /// back to the toplevel they were armed for. Lets the dispatch
-    /// handler route the terminal event to the right surface without
-    /// scanning every toplevel.
-    #[cfg(feature = "presentation-time")]
-    pub(crate) feedback_owner: HashMap<WpPresentationFeedback, SurfaceId>,
-
-    /// Per-feedback `sync_output` accumulator. The protocol sends
-    /// zero-or-more `sync_output` events before the terminal
-    /// `Presented`; we stash the latest here so the terminal arm can
-    /// attach it to the [`crate::PresentationInfo`].
-    #[cfg(feature = "presentation-time")]
-    pub(crate) feedback_sync_output: HashMap<WpPresentationFeedback, OutputId>,
 }
 
 impl State {
@@ -713,10 +660,6 @@ impl Connection {
         let xdg_activation: Option<XdgActivationV1> =
             bind_optional(&global_list, &qh, "xdg_activation_v1", 1);
 
-        #[cfg(feature = "presentation-time")]
-        let presentation: Option<WpPresentation> =
-            bind_optional(&global_list, &qh, "wp_presentation", 2);
-
         Ok(Connection {
             wl,
             queue,
@@ -739,8 +682,6 @@ impl Connection {
                 viewporter,
                 #[cfg(feature = "xdg-activation")]
                 xdg_activation,
-                #[cfg(feature = "presentation-time")]
-                presentation,
             },
         })
     }
@@ -2300,150 +2241,6 @@ impl Dispatch<XdgActivationTokenV1, ()> for State {
         }
     }
 }
-
-// ── wp_presentation / wp_presentation_feedback ──────────────────────────────
-
-#[cfg(feature = "presentation-time")]
-impl Dispatch<WpPresentation, ()> for State {
-    fn event(
-        state: &mut Self,
-        _: &WpPresentation,
-        event: <WpPresentation as wayland_client::Proxy>::Event,
-        _: &(),
-        _: &WlConnection,
-        _: &QueueHandle<Self>,
-    ) {
-        if let WpPresentationEvent::ClockId { clk_id } = event {
-            state.presentation_clock_id = Some(clk_id);
-        }
-    }
-}
-
-/// Internal helper: arm a fresh `wp_presentation_feedback` against
-/// `wl_surface` and remember which toplevel it belongs to so the
-/// destructor dispatch knows where to route the terminal event.
-/// No-op (silent) when the compositor doesn't advertise
-/// `wp_presentation` — consumer sees zero `FramePresented` events.
-#[cfg(feature = "presentation-time")]
-pub(crate) fn arm_presentation_feedback(
-    state: &mut State,
-    qh: &QueueHandle<State>,
-    wl_surface: &WlSurface,
-    surface_id: SurfaceId,
-) {
-    let Some(manager) = state.presentation_manager.as_ref() else {
-        return;
-    };
-    let feedback = manager.feedback(wl_surface, qh, ());
-    state.feedback_owner.insert(feedback, surface_id);
-}
-
-#[cfg(feature = "presentation-time")]
-impl Dispatch<WpPresentationFeedback, ()> for State {
-    fn event(
-        state: &mut Self,
-        proxy: &WpPresentationFeedback,
-        event: <WpPresentationFeedback as wayland_client::Proxy>::Event,
-        _: &(),
-        _: &WlConnection,
-        qh: &QueueHandle<Self>,
-    ) {
-        // Accumulate sync_output across pre-terminal events. The
-        // protocol guarantees all sync_output events precede the
-        // terminal Presented; we stash them in a side table keyed by
-        // the proxy so the terminal arm can read them out.
-        //
-        // Multi-output sync (surface spanning two outputs) is rare;
-        // we keep just the last reported output for simplicity. The
-        // spec recommends compositors choose the output containing
-        // the largest part of the surface anyway.
-        match event {
-            WpPresentationFeedbackEvent::SyncOutput { output } => {
-                if let Some(out_id) = state.outputs.get(&output).map(|o| o.id) {
-                    state.feedback_sync_output.insert(proxy.clone(), out_id);
-                }
-            }
-            WpPresentationFeedbackEvent::Presented {
-                tv_sec_hi,
-                tv_sec_lo,
-                tv_nsec,
-                refresh,
-                seq_hi,
-                seq_lo,
-                flags,
-            } => {
-                let surface_id = match state.feedback_owner.remove(proxy) {
-                    Some(id) => id,
-                    None => return,
-                };
-                let sync_output = state.feedback_sync_output.remove(proxy);
-                let secs = ((tv_sec_hi as u64) << 32) | tv_sec_lo as u64;
-                let time = std::time::Duration::new(secs, tv_nsec);
-                let refresh_dur = std::time::Duration::from_nanos(refresh as u64);
-                let seq = ((seq_hi as u64) << 32) | seq_lo as u64;
-                let kind_bits = match flags {
-                    wayland_client::WEnum::Value(k) => k.bits(),
-                    wayland_client::WEnum::Unknown(raw) => raw,
-                };
-                let info = crate::PresentationInfo {
-                    time,
-                    refresh: refresh_dur,
-                    seq,
-                    sync_output,
-                    flags: crate::PresentFlags::from_bits_truncate(kind_bits),
-                };
-                if let Some(tl_state_rc) = state.toplevels.get(&surface_id) {
-                    let tl_state_rc = Arc::clone(tl_state_rc);
-                    tl_state_rc.lock().unwrap().last_presented = Some(info);
-                    state.pending_events.push(Event::WindowEvent {
-                        surface_id,
-                        event: WindowEvent::FramePresented(info),
-                    });
-                    // Re-arm: keep the rolling feedback chain alive so
-                    // the next commit also gets feedback.
-                    let wl_surface = state
-                        .surface_id_by_wl
-                        .iter()
-                        .find_map(|(s, &id)| (id == surface_id).then(|| s.clone()));
-                    if let Some(wl_surface) = wl_surface {
-                        arm_presentation_feedback(state, qh, &wl_surface, surface_id);
-                    }
-                }
-            }
-            WpPresentationFeedbackEvent::Discarded => {
-                let surface_id = match state.feedback_owner.remove(proxy) {
-                    Some(id) => id,
-                    None => return,
-                };
-                state.feedback_sync_output.remove(proxy);
-                state.pending_events.push(Event::WindowEvent {
-                    surface_id,
-                    event: WindowEvent::FrameDiscarded,
-                });
-                let wl_surface = state
-                    .surface_id_by_wl
-                    .iter()
-                    .find_map(|(s, &id)| (id == surface_id).then(|| s.clone()));
-                if let Some(wl_surface) = wl_surface {
-                    arm_presentation_feedback(state, qh, &wl_surface, surface_id);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-// Suppress `kind_bits` import when feature off. The kind type is
-// pulled in only above; the use statement at the top of file is
-// already feature-gated.
-#[cfg(feature = "presentation-time")]
-#[allow(dead_code)]
-const _: fn() = || {
-    // Type-check that PresentFlags bit mapping stays sync with the
-    // protocol enum. Both are u32 bitfields; we only assert
-    // compile-time soundness here, not runtime equivalence.
-    let _: WpPresentationFeedbackKind = WpPresentationFeedbackKind::Vsync;
-};
 
 #[cfg(test)]
 mod tests {

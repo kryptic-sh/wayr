@@ -95,9 +95,6 @@ mod subsurface;
 #[cfg(feature = "text-input")]
 mod ime;
 
-#[cfg(feature = "presentation-time")]
-mod presentation;
-
 pub use crate::cursor::CursorIcon;
 #[cfg(feature = "xdg-activation")]
 pub use crate::error::ActivationError;
@@ -124,6 +121,3 @@ pub use crate::subsurface::{Subsurface, SubsurfaceBuilder};
 
 #[cfg(feature = "text-input")]
 pub use crate::ime::{ContentHint, ContentPurpose, Ime, ImeEvent};
-
-#[cfg(feature = "presentation-time")]
-pub use crate::presentation::{PresentFlags, PresentationClock, PresentationInfo};
