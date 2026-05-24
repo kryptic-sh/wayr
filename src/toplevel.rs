@@ -163,6 +163,80 @@ impl Toplevel {
             .as_ref()
             .map(|wp| crate::Ime { wp: wp.clone() })
     }
+
+    /// Request the compositor focus this toplevel via
+    /// `xdg_activation_v1`. The compositor decides — most reject
+    /// requests not tied to a recent user input event to prevent
+    /// focus-stealing, so this is best-effort.
+    ///
+    /// Wire flow:
+    ///   1. `xdg_activation_v1.get_activation_token` → fresh token proxy.
+    ///   2. `xdg_activation_token_v1.set_serial(last_input_serial, seat)`
+    ///      and `set_surface(self.wl_surface)`.
+    ///   3. `xdg_activation_token_v1.commit` — compositor responds with
+    ///      a `done(token_str)` event.
+    ///   4. Dispatch handler calls `xdg_activation_v1.activate(token_str,
+    ///      self.wl_surface)`.
+    ///
+    /// Returns `Ok(())` when the token request was sent (the activation
+    /// may still no-op compositor-side), `Err(ActivationError::Unsupported)`
+    /// when the compositor doesn't advertise `xdg_activation_v1`, and
+    /// `Err(ActivationError::NoInputSerial)` when wayr hasn't seen any
+    /// pointer/keyboard/touch input yet (no serial to attach).
+    #[cfg(feature = "xdg-activation")]
+    pub fn request_activation<T>(
+        &self,
+        event_loop: &mut crate::EventLoop<T>,
+    ) -> std::result::Result<(), crate::ActivationError> {
+        use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
+
+        let serial = event_loop.state.last_input_serial;
+        if serial == 0 {
+            return Err(crate::ActivationError::NoInputSerial);
+        }
+
+        let manager: &XdgActivationV1 = event_loop
+            .connection
+            .globals
+            .xdg_activation
+            .as_ref()
+            .ok_or(crate::ActivationError::Unsupported)?;
+
+        let qh = event_loop.queue_handle();
+        let token = manager.get_activation_token(&qh, ());
+        token.set_serial(serial, &event_loop.connection.globals.seat);
+        token.set_surface(&self.wl_surface);
+        // Register before commit so the Done dispatch finds the entry.
+        event_loop
+            .state
+            .pending_activation_tokens
+            .insert(token.clone(), self.wl_surface.clone());
+        token.commit();
+        Ok(())
+    }
+
+    /// Activate this surface using a token string handed in from
+    /// outside (typically via the `XDG_ACTIVATION_TOKEN` env var passed
+    /// from the process that launched us). Bypasses the
+    /// `get_activation_token` handshake — the token already exists.
+    ///
+    /// Returns `Err(ActivationError::Unsupported)` when the compositor
+    /// doesn't advertise `xdg_activation_v1`.
+    #[cfg(feature = "xdg-activation")]
+    pub fn set_activation_token<T>(
+        &self,
+        event_loop: &crate::EventLoop<T>,
+        token: impl Into<String>,
+    ) -> std::result::Result<(), crate::ActivationError> {
+        let manager = event_loop
+            .connection
+            .globals
+            .xdg_activation
+            .as_ref()
+            .ok_or(crate::ActivationError::Unsupported)?;
+        manager.activate(token.into(), &self.wl_surface);
+        Ok(())
+    }
 }
 
 impl Drop for Toplevel {

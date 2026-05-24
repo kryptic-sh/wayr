@@ -74,6 +74,13 @@ use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 #[cfg(feature = "fractional-scale")]
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
+#[cfg(feature = "xdg-activation")]
+use wayland_protocols::xdg::activation::v1::client::xdg_activation_token_v1::{
+    Event as XdgActivationTokenEvent, XdgActivationTokenV1,
+};
+#[cfg(feature = "xdg-activation")]
+use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
+
 /// Owning handle for the live Wayland connection + bound globals.
 ///
 /// One per [`crate::EventLoop`]. Dropped on event-loop teardown; the
@@ -153,6 +160,12 @@ pub(crate) struct Globals {
     /// consumer renders at physical resolution.
     #[cfg(feature = "fractional-scale")]
     pub(crate) viewporter: Option<WpViewporter>,
+
+    /// `xdg_activation_v1` — present when the `xdg-activation` feature
+    /// is on AND the compositor advertises the global. Drives
+    /// [`crate::Toplevel::request_activation`].
+    #[cfg(feature = "xdg-activation")]
+    pub(crate) xdg_activation: Option<XdgActivationV1>,
 }
 
 /// Per-output mirrored state. Populated from the wl_output dispatch
@@ -479,6 +492,32 @@ pub(crate) struct State {
     /// clears it. Consumers re-arm each iteration from
     /// `about_to_wait`.
     pub(crate) wait_until: Option<std::time::Instant>,
+
+    /// Most recent input-event serial — last `wl_pointer.button`,
+    /// `wl_keyboard.key` (press only), or `wl_touch.down` — used by
+    /// [`crate::Toplevel::request_activation`] for
+    /// `xdg_activation_token_v1.set_serial`. Compositors validate that
+    /// activation requests carry a recent input serial to prevent
+    /// background processes stealing focus. `0` until the user
+    /// interacts with any of our surfaces (matches the wayland
+    /// "no serial yet" convention).
+    pub(crate) last_input_serial: u32,
+
+    /// Pending `xdg_activation_token_v1` requests awaiting the `done`
+    /// event. Keyed by the token proxy; the stored `WlSurface` is the
+    /// surface to activate once the token string arrives. Entries are
+    /// removed in the token's `done` dispatch arm before
+    /// `xdg_activation_v1.activate` fires.
+    #[cfg(feature = "xdg-activation")]
+    pub(crate) pending_activation_tokens: HashMap<XdgActivationTokenV1, WlSurface>,
+
+    /// Clone of the `xdg_activation_v1` manager proxy (when bound) so
+    /// the token-`done` dispatch arm can call
+    /// `activate(token, surface)` without re-walking the proxy graph.
+    /// `None` when the feature is on but the compositor doesn't
+    /// advertise the global.
+    #[cfg(feature = "xdg-activation")]
+    pub(crate) xdg_activation_manager: Option<XdgActivationV1>,
 }
 
 impl State {
@@ -605,6 +644,10 @@ impl Connection {
         #[cfg(feature = "fractional-scale")]
         let viewporter: Option<WpViewporter> = bind_optional(&global_list, &qh, "wp_viewporter", 1);
 
+        #[cfg(feature = "xdg-activation")]
+        let xdg_activation: Option<XdgActivationV1> =
+            bind_optional(&global_list, &qh, "xdg_activation_v1", 1);
+
         Ok(Connection {
             wl,
             queue,
@@ -625,6 +668,8 @@ impl Connection {
                 fractional_scale_manager,
                 #[cfg(feature = "fractional-scale")]
                 viewporter,
+                #[cfg(feature = "xdg-activation")]
+                xdg_activation,
             },
         })
     }
@@ -879,10 +924,18 @@ impl Dispatch<WlKeyboard, ()> for State {
                 state.keyboard.repeating = None;
             }
             WlKeyboardEvent::Key {
+                serial,
                 key,
                 state: key_state,
                 ..
             } => {
+                // Track press serial for xdg_activation_token_v1.set_serial.
+                // Compositors accept release serials too, but the spec
+                // recommends "most recent user input"; press is the
+                // canonical "user did a thing just now" signal.
+                if matches!(key_state, WEnum::Value(WlKeyState::Pressed)) {
+                    state.last_input_serial = serial;
+                }
                 let surface_id = match state.keyboard.focused_surface {
                     Some(id) => id,
                     None => return,
@@ -1105,10 +1158,13 @@ impl Dispatch<WlPointer, ()> for State {
                 }
             }
             WlPointerEvent::Button {
+                serial,
                 button,
                 state: btn_state,
                 ..
             } => {
+                // Track for xdg_activation_token_v1.set_serial.
+                state.last_input_serial = serial;
                 if let Some(id) = state.pointer.focused_surface {
                     let pb = evdev_to_pointer_button(button);
                     let pbs = match btn_state {
@@ -1894,8 +1950,14 @@ impl Dispatch<WlTouch, ()> for State {
     ) {
         match event {
             WlTouchEvent::Down {
-                surface, id, x, y, ..
+                serial,
+                surface,
+                id,
+                x,
+                y,
+                ..
             } => {
+                state.last_input_serial = serial;
                 let surface_id = match state.surface_id_by_wl.get(&surface) {
                     Some(&id) => id,
                     None => return,
@@ -2090,6 +2152,59 @@ impl Dispatch<WpCursorShapeDeviceV1, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         // No events on the device.
+    }
+}
+
+// ── xdg_activation_v1 ────────────────────────────────────────────────────────
+
+#[cfg(feature = "xdg-activation")]
+impl Dispatch<XdgActivationV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &XdgActivationV1,
+        _: <XdgActivationV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        // xdg_activation_v1 carries no client-facing events.
+    }
+}
+
+#[cfg(feature = "xdg-activation")]
+impl Dispatch<XdgActivationTokenV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        token: &XdgActivationTokenV1,
+        event: <XdgActivationTokenV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &WlConnection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let XdgActivationTokenEvent::Done { token: token_str } = event {
+            // Resolve the surface this token was created for, fire
+            // activate(), and clean up. The activation manager proxy
+            // lives on the Connection globals — we re-resolved it via
+            // the token's parent rather than storing a clone, which
+            // wayland-client doesn't expose. Instead, we recover it
+            // from the surface_id_by_wl-shared queue handle via the
+            // event_loop accessor at call-site time; here we just hand
+            // off to a free helper that looks the proxy up off the
+            // proxy id.
+            if let Some(surface) = state.pending_activation_tokens.remove(token) {
+                // The activation manager proxy must still be live —
+                // tokens are short-lived and can only exist when the
+                // manager was bound. We re-resolve it by walking the
+                // token's parent display via wayland-client's proxy
+                // graph. Simpler: stash the manager as a Connection
+                // global accessor + clone into State at connect time.
+                if let Some(mgr) = state.xdg_activation_manager.as_ref() {
+                    mgr.activate(token_str, &surface);
+                }
+            }
+            // Per protocol: token proxies are single-use; destroy on done.
+            token.destroy();
+        }
     }
 }
 

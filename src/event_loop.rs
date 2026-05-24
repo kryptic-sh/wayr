@@ -63,7 +63,11 @@ impl<T> EventLoop<T> {
     pub fn new() -> Result<Self> {
         let connection = Connection::connect_to_env()?;
         #[cfg_attr(
-            not(any(feature = "text-input", feature = "cursor-shape")),
+            not(any(
+                feature = "text-input",
+                feature = "cursor-shape",
+                feature = "xdg-activation"
+            )),
             allow(unused_mut)
         )]
         let mut state = State::default();
@@ -87,6 +91,14 @@ impl<T> EventLoop<T> {
         #[cfg(feature = "cursor-shape")]
         {
             state.cursor_shape_manager = connection.globals.cursor_shape_manager.clone();
+        }
+
+        // xdg_activation_v1 manager: cloned into state so the
+        // `XdgActivationTokenV1::Done` dispatch can call
+        // `activate(token, surface)` without re-walking Connection.
+        #[cfg(feature = "xdg-activation")]
+        {
+            state.xdg_activation_manager = connection.globals.xdg_activation.clone();
         }
 
         Ok(Self {

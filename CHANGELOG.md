@@ -8,6 +8,32 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-05-24
+
+### Added
+
+- `xdg-activation` feature flag — opt-in `xdg_activation_v1` binding. When the
+  compositor advertises the global, consumers gain two new `Toplevel` methods:
+  - `Toplevel::request_activation(event_loop)` — kicks off the two-step
+    activation handshake (`get_activation_token` → `set_serial(last_input)` →
+    `set_surface` → `commit`; on the token's `done` event,
+    `activate(token, surface)`). Used by multi-instance apps (e.g. buffr's
+    `--new-tab` forwarder) to focus the existing window from a second process.
+  - `Toplevel::set_activation_token(event_loop, token)` — direct
+    `activate(token, surface)` for the cross-process handoff path where the
+    launching process passes a token through the `XDG_ACTIVATION_TOKEN` env var.
+    Bypasses the handshake; the token already exists.
+- `ActivationError::{Unsupported, NoInputSerial}` returned by the above —
+  distinguishes compositor lacks-protocol vs. wayr hasn't-seen-input-yet
+  (compositors reject activation without a recent input serial to prevent
+  focus-stealing).
+- Last input serial (`wl_pointer.button`, `wl_keyboard.key` Pressed,
+  `wl_touch.down`) is now tracked on the connection state so
+  `xdg_activation_token_v1.set_serial` carries a serial the compositor will
+  accept.
+
+[0.1.8]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.8
+
 ## [0.1.7] - 2026-05-24
 
 ### Added
@@ -133,7 +159,7 @@ and this project adheres to
   queued for a future release; this immediate path is sufficient for the
   consumer that needed it.
 
-[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.8...HEAD
 [0.1.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.1
 
 ## [0.1.0] - 2026-05-23

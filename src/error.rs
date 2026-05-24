@@ -92,3 +92,45 @@ impl From<std::io::Error> for Error {
 
 /// Convenience alias used throughout the public API.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Why an `xdg_activation_v1` request couldn't be issued.
+///
+/// Distinct from [`Error`] because activation is best-effort by design
+/// — most failures are recoverable (e.g. caller can fall back to
+/// raising a notification via the host shell instead of forcing focus).
+#[cfg(feature = "xdg-activation")]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ActivationError {
+    /// The compositor doesn't advertise `xdg_activation_v1`. Most
+    /// modern compositors do (KWin, Mutter, sway, Hyprland, River);
+    /// older or experimental ones may not.
+    Unsupported,
+
+    /// `wayr` hasn't seen any user input on any of our surfaces yet, so
+    /// there's no input serial to attach. Compositors reject activation
+    /// requests without a recent serial to prevent focus-stealing by
+    /// background processes. Wait for the first
+    /// [`crate::WindowEvent::PointerButton`] /
+    /// [`crate::WindowEvent::Key`] / [`crate::WindowEvent::Touch`]
+    /// before calling.
+    NoInputSerial,
+}
+
+#[cfg(feature = "xdg-activation")]
+impl fmt::Display for ActivationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ActivationError::Unsupported => {
+                write!(f, "compositor does not advertise xdg_activation_v1")
+            }
+            ActivationError::NoInputSerial => write!(
+                f,
+                "no recent input serial — compositor would reject the request"
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "xdg-activation")]
+impl std::error::Error for ActivationError {}

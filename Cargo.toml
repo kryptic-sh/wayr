@@ -1,6 +1,6 @@
 [package]
 name = "wayr"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -38,6 +38,13 @@ cursor-shape = ["wayland-protocols/unstable"]
 # `WindowEvent::ScaleFactorChanged` reports the fractional value
 # (rather than just the integer max-output scale).
 fractional-scale = []
+# `xdg_activation_v1` (stable xdg) — programmatic focus / activation
+# requests so multi-instance apps (buffr's `--new-tab` forwarder) can
+# bring the existing window forward. Activation handshake requires a
+# recent input serial; compositors otherwise no-op the request to
+# prevent focus stealing. KWin / Mutter / sway / Hyprland advertise it;
+# wayr logs + no-ops when the compositor doesn't.
+xdg-activation = []
 
 [dependencies]
 # Used by layer-shell `Anchor` flags and text-input `ContentHint`.

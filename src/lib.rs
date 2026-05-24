@@ -96,6 +96,8 @@ mod subsurface;
 mod ime;
 
 pub use crate::cursor::CursorIcon;
+#[cfg(feature = "xdg-activation")]
+pub use crate::error::ActivationError;
 pub use crate::error::{Error, Result};
 pub use crate::event::{Event, WindowEvent};
 pub use crate::event_loop::{ApplicationHandler, EventLoop, EventLoopProxy};
