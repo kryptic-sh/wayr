@@ -166,6 +166,9 @@ pub(crate) struct OutputState {
     pub(crate) scale: i32,
     pub(crate) physical_size: Size,
     pub(crate) position: (i32, i32),
+    /// Refresh rate in mHz from the most recent `wl_output.mode`
+    /// event flagged `current`. `0` until the compositor sends mode.
+    pub(crate) refresh_mhz: i32,
     /// Pending state staged via `wl_output.geometry` / `.mode` / `.scale`
     /// is only applied on `done` (per the protocol's atomic-set
     /// guarantee). We mirror straight into the live fields above and
@@ -182,6 +185,7 @@ impl OutputState {
             scale: self.scale.max(1),
             physical_size: self.physical_size,
             position: self.position,
+            refresh_mhz: self.refresh_mhz,
         }
     }
 }
@@ -468,6 +472,13 @@ pub(crate) struct State {
 
     /// Set by `EventLoop::exit`. Drives the run loop to bail.
     pub(crate) exit_requested: bool,
+
+    /// Optional single-shot deadline set by `EventLoop::wait_until`.
+    /// The run loop caps `blocking_pump`'s timeout at this value
+    /// (taking the minimum against other internal deadlines), then
+    /// clears it. Consumers re-arm each iteration from
+    /// `about_to_wait`.
+    pub(crate) wait_until: Option<std::time::Instant>,
 }
 
 impl State {
@@ -1272,9 +1283,21 @@ impl Dispatch<WlOutput, ()> for State {
                 entry.position = (x, y);
                 entry.ready = false;
             }
-            WlOutputEvent::Mode { width, height, .. } => {
-                entry.physical_size = Size::new(width.max(0) as u32, height.max(0) as u32);
-                entry.ready = false;
+            WlOutputEvent::Mode {
+                flags,
+                width,
+                height,
+                refresh,
+            } => {
+                // Compositors may advertise multiple modes (e.g. a
+                // user-selectable 60/144/165 Hz list). Only the mode
+                // flagged `current` describes the live output state.
+                let is_current = matches!(flags, WEnum::Value(f) if f.contains(wayland_client::protocol::wl_output::Mode::Current));
+                if is_current {
+                    entry.physical_size = Size::new(width.max(0) as u32, height.max(0) as u32);
+                    entry.refresh_mhz = refresh;
+                    entry.ready = false;
+                }
             }
             WlOutputEvent::Scale { factor } => {
                 entry.scale = factor.max(1);

@@ -8,6 +8,24 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-05-24
+
+### Added
+
+- `EventLoop::wait_until(deadline)` — single-shot cap on the next
+  `blocking_pump` sleep. Lets consumers drive animation pacing from
+  `about_to_wait` (call it with the next-frame deadline) so the loop wakes on
+  time instead of waiting the default 50 ms idle cap. Composes with internal
+  deadlines (key-repeat, blocking_pump max) via min. Real input still preempts
+  via `poll(2)`.
+- `OutputInfo::refresh_mhz` — refresh rate of the active mode, in millihertz
+  (e.g. `60000` = 60 Hz, `144000` = 144 Hz). Wired from `wl_output.mode` events
+  flagged `current`; multi-mode displays no longer have their refresh
+  overwritten by stale advertised modes. `0` until the compositor sends the
+  first mode event.
+
+[0.1.6]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.6
+
 ## [0.1.5] - 2026-05-23
 
 ### Added
@@ -102,7 +120,7 @@ and this project adheres to
   queued for a future release; this immediate path is sufficient for the
   consumer that needed it.
 
-[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.6...HEAD
 [0.1.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.1
 
 ## [0.1.0] - 2026-05-23

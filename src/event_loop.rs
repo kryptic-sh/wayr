@@ -147,6 +147,30 @@ impl<T> EventLoop<T> {
         self.state.exit_requested = true;
     }
 
+    /// Cap the next `blocking_pump` sleep at `deadline`. Single-shot:
+    /// the loop honours it for one iteration, then clears the value.
+    /// Re-arm from `about_to_wait` each iteration if you want a
+    /// persistent deadline.
+    ///
+    /// Useful for animation pacing — consumers that want a paint at
+    /// `t + frame_period` can call `event_loop.wait_until(deadline)`
+    /// from `about_to_wait` so the next iteration starts no later
+    /// than the deadline (instead of the default 50 ms idle cap).
+    /// Real input still preempts the sleep via `poll(2)` — the
+    /// deadline only takes effect when no socket activity arrives
+    /// before it.
+    ///
+    /// Calling with a past instant is fine (sleep returns
+    /// immediately). The minimum of all internal deadlines + this
+    /// value wins, so passing a far-future instant is equivalent to
+    /// not calling at all.
+    pub fn wait_until(&mut self, deadline: std::time::Instant) {
+        self.state.wait_until = Some(match self.state.wait_until {
+            Some(prev) => prev.min(deadline),
+            None => deadline,
+        });
+    }
+
     /// Snapshot of every output currently connected.
     ///
     /// Each entry includes scale, position, physical size, name +
@@ -221,18 +245,21 @@ impl<T> EventLoop<T> {
             // key-repeat fire time. If `drain_*` queued events,
             // blocking_pump returns immediately (its first action
             // checks `pending_events.is_empty()`).
+            //
+            // Timeout is the minimum of: the 50ms idle cap, the
+            // consumer's wait_until deadline (if set during
+            // about_to_wait), and the next key-repeat deadline (if
+            // any). Internal deadlines reset every iteration; the
+            // consumer's wait_until is single-shot.
             let pump_cap = Duration::from_millis(50);
-            let timeout = self
-                .state
-                .keyboard
-                .repeating
-                .as_ref()
-                .map(|r| {
-                    r.next_fire_at
-                        .saturating_duration_since(Instant::now())
-                        .min(pump_cap)
-                })
-                .unwrap_or(pump_cap);
+            let now = Instant::now();
+            let mut timeout = pump_cap;
+            if let Some(rep) = self.state.keyboard.repeating.as_ref() {
+                timeout = timeout.min(rep.next_fire_at.saturating_duration_since(now));
+            }
+            if let Some(deadline) = self.state.wait_until.take() {
+                timeout = timeout.min(deadline.saturating_duration_since(now));
+            }
             self.blocking_pump(timeout);
 
             // Drain whatever the dispatch produced. `std::mem::take`

@@ -41,4 +41,9 @@ pub struct OutputInfo {
     /// Position in compositor-global coordinates (used by multi-monitor
     /// arrangements). Logical pixels; pre-scale.
     pub position: (i32, i32),
+    /// Refresh rate of the active mode, in millihertz (e.g. `60000`
+    /// = 60 Hz, `144000` = 144 Hz). `0` until the compositor has
+    /// sent the first `wl_output.mode` event. Divide by 1000.0 for
+    /// Hz, or round to integer Hz with `(refresh_mhz + 500) / 1000`.
+    pub refresh_mhz: i32,
 }
