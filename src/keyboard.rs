@@ -97,6 +97,37 @@ pub struct KeyEvent {
     pub repeat: bool,
 }
 
+impl KeyEvent {
+    /// Construct a `KeyEvent` directly. Intended for unit tests —
+    /// `KeyEvent` is `#[non_exhaustive]` so consumers can't build
+    /// one with a struct literal. The wayland dispatch path uses
+    /// internal-only construction; this constructor exists so
+    /// consumers writing key-routing logic (modal engines, IME
+    /// adapters, …) can exercise their code against synthetic
+    /// events.
+    ///
+    /// Note: this is not gated behind `#[cfg(test)]` so consumers
+    /// can use it in their own test modules across the crate
+    /// boundary.
+    pub fn new_for_test(
+        scancode: ScanCode,
+        key_code: KeyCode,
+        modifiers: Modifiers,
+        state: KeyState,
+        text: Option<String>,
+        repeat: bool,
+    ) -> Self {
+        Self {
+            scancode,
+            key_code,
+            modifiers,
+            state,
+            text,
+            repeat,
+        }
+    }
+}
+
 /// Configured key-repeat behaviour, reported by the compositor.
 ///
 /// `wayr` drives repeat events internally using a calloop timer so

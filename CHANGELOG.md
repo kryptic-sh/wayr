@@ -8,6 +8,19 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-05-24
+
+### Added
+
+- `KeyEvent::new_for_test(...)` constructor. `KeyEvent` is `#[non_exhaustive]`
+  so consumers couldn't build one with a struct literal — meaning unit tests
+  that exercise key-routing logic (modal engines, IME adapters) had to either
+  gate the test away or work through a private translation seam. The new
+  constructor is a plain pub helper (no `#[cfg(test)]` gate) so it's reachable
+  from consumer test modules across the crate boundary.
+
+[0.1.7]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.7
+
 ## [0.1.6] - 2026-05-24
 
 ### Added
@@ -120,7 +133,7 @@ and this project adheres to
   queued for a future release; this immediate path is sufficient for the
   consumer that needed it.
 
-[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.7...HEAD
 [0.1.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.1
 
 ## [0.1.0] - 2026-05-23
