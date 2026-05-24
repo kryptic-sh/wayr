@@ -1263,13 +1263,19 @@ impl Dispatch<WlPointer, ()> for State {
                     || state.pointer.axis_discrete_v != 0
                     || state.pointer.axis_value120_v != 0
                 {
+                    // Wayland's wl_pointer.axis convention is "positive
+                    // vertical = scroll down (page goes toward bottom)".
+                    // winit (and every other cross-platform windowing
+                    // toolkit) normalises this to "positive = scroll up"
+                    // so consumers don't have to flip per backend.
+                    // Match winit; negate vertical at the emission site.
                     state.pending_events.push(Event::WindowEvent {
                         surface_id: id,
                         event: WindowEvent::Scroll(ScrollEvent {
                             axis: AxisDirection::Vertical,
-                            delta: state.pointer.axis_vertical,
-                            discrete_steps: state.pointer.axis_discrete_v,
-                            high_res_120: state.pointer.axis_value120_v,
+                            delta: -state.pointer.axis_vertical,
+                            discrete_steps: -state.pointer.axis_discrete_v,
+                            high_res_120: -state.pointer.axis_value120_v,
                             source,
                         }),
                     });

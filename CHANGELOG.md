@@ -8,6 +8,20 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-25
+
+### Fixed
+
+- `ScrollEvent` vertical sign now matches winit: positive = scroll up (toward
+  top of doc). Wayland's `wl_pointer.axis` uses the opposite convention
+  (positive = scroll down). Previously wayr passed Wayland values through
+  unchanged, forcing every consumer to flip the sign on their own to feel
+  correct. Now the negation lives at the wayr emission site for `delta`,
+  `discrete_steps`, and `high_res_120`. Horizontal axis unchanged (Wayland and
+  winit both use positive = scroll right).
+
+[0.2.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.2.1
+
 ## [0.2.0] - 2026-05-24
 
 ### Removed (BREAKING)
