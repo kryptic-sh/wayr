@@ -8,6 +8,21 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-05-24
+
+### Added
+
+- `Toplevel::set_damage(rect)` + `Toplevel::set_damage_full()` — queue damage
+  regions for the next commit in buffer coordinates. Translates to
+  `wl_surface.damage_buffer` immediately; the queued damage takes effect on
+  whatever code calls `wl_surface.commit` next (typically wgpu's / vulkano's WSI
+  inside `present()` — wayr does not own that commit path). Lets consumers
+  report tight dirty rects on partial-frame repaints (chrome, scroll, OSR push
+  region) so the compositor can skip blits for unchanged regions. Phase 1 of
+  issue #20 — no commit-path ownership required for the damage-tracking win.
+
+[0.1.11]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.11
+
 ## [0.1.10] - 2026-05-24
 
 ### Added
@@ -210,7 +225,7 @@ and this project adheres to
   queued for a future release; this immediate path is sufficient for the
   consumer that needed it.
 
-[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.11...HEAD
 [0.1.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.1
 
 ## [0.1.0] - 2026-05-23

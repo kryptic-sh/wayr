@@ -197,6 +197,54 @@ impl Toplevel {
         }
     }
 
+    /// Queue a damage region for the next commit, in **buffer
+    /// coordinates** (post-scale physical pixels). The compositor
+    /// uses queued damage to skip blits for unchanged regions —
+    /// real wins on partial-frame repaints (chrome dirty, OSR push
+    /// region, scroll updates).
+    ///
+    /// Wire flow: this call issues `wl_surface.damage_buffer`
+    /// immediately. The damage is queued on the wl_surface and takes
+    /// effect on whatever code performs the next
+    /// [`wl_surface.commit`] — wayr does not own that commit
+    /// (typically wgpu's `surface.present()` / vulkano's
+    /// `swapchain.present()` calls it through the WSI bridge).
+    ///
+    /// Call ordering:
+    ///   1. Render into your wgpu / vulkano frame
+    ///   2. `toplevel.set_damage(rect)` — once per dirty region; call
+    ///      multiple times to union
+    ///   3. `frame.present()` — wgpu/vulkano commits the surface,
+    ///      pulling in the queued damage
+    ///
+    /// If `set_damage` is never called between commits, the
+    /// compositor falls back to treating the whole surface as
+    /// damaged (correct but inefficient). Use
+    /// [`Toplevel::set_damage_full`] to explicitly request that.
+    ///
+    /// Coordinates / clamping: the compositor clamps `(x + width)` /
+    /// `(y + height)` to the surface's buffer size; passing
+    /// `i32::MAX` is safe and is the convention for "everything".
+    pub fn set_damage(&self, rect: crate::Rect) {
+        self.wl_surface.damage_buffer(
+            rect.position.x,
+            rect.position.y,
+            rect.size.width as i32,
+            rect.size.height as i32,
+        );
+    }
+
+    /// Convenience: mark the whole surface dirty for the next commit.
+    /// Equivalent to `set_damage(Rect{ (0,0), (i32::MAX, i32::MAX) })`
+    /// — the compositor clamps to the actual buffer size.
+    ///
+    /// Use this when you don't know what changed (or everything
+    /// changed); pass tight rects via [`Toplevel::set_damage`] when
+    /// you do — that's where the compositor blit savings live.
+    pub fn set_damage_full(&self) {
+        self.wl_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+    }
+
     /// Set the cursor shape shown when the pointer is over this
     /// surface. Sticky until the next call.
     ///
