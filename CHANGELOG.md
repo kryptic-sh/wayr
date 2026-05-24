@@ -8,6 +8,35 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-05-24
+
+### Added
+
+- `presentation-time` feature flag — opt-in `wp_presentation` binding +
+  always-armed `wp_presentation_feedback` chain per `Toplevel`. No commit hook
+  required: wayr keeps one feedback object outstanding per surface and re-arms
+  in the destructor dispatch. The compositor automatically binds each feedback
+  to whichever commit it sees next on the surface (wgpu, vulkano, raw — wayr
+  doesn't need to intercept).
+  - `WindowEvent::FramePresented(PresentationInfo)` — fired per presented frame.
+    Carries hardware-timestamped present time, the compositor's predicted
+    refresh period, monotonic frame sequence, sync output, and a `PresentFlags`
+    bitfield (vsync / hw_clock / hw_completion / zero_copy).
+  - `WindowEvent::FrameDiscarded` — fired when a commit was superseded before
+    display (workspace switch mid-flight; rapid re-paint that obsoleted an
+    in-flight frame).
+  - `Toplevel::last_presented()` — synchronous cache of the latest
+    `FramePresented` payload, derived from the event stream. `None` until the
+    compositor presents the first frame.
+  - `Toplevel::estimated_next_vblank()` — predicted next-vblank `Instant`
+    derived from `last_presented`. Feed into `EventLoop::wait_until` to schedule
+    the next paint inside the upcoming refresh window for vsync-aligned
+    `wgpu.present()`.
+  - `PresentationClock` + `PresentFlags` + `PresentationInfo` public types
+    re-exported at the crate root.
+
+[0.1.10]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.10
+
 ## [0.1.9] - 2026-05-24
 
 ### Added
@@ -181,7 +210,7 @@ and this project adheres to
   queued for a future release; this immediate path is sufficient for the
   consumer that needed it.
 
-[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/kryptic-sh/wayr/compare/v0.1.10...HEAD
 [0.1.1]: https://github.com/kryptic-sh/wayr/releases/tag/v0.1.1
 
 ## [0.1.0] - 2026-05-23

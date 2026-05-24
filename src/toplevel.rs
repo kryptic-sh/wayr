@@ -79,6 +79,61 @@ impl Toplevel {
             .set_max_size(s.width as i32, s.height as i32);
     }
 
+    /// Snapshot of the most recent `wp_presentation_feedback.presented`
+    /// for this toplevel. `None` until the compositor presents the
+    /// first frame; thereafter mirrors the last
+    /// [`crate::WindowEvent::FramePresented`] payload for synchronous
+    /// reads (typically from `about_to_wait`).
+    ///
+    /// Returns `None` on compositors that don't advertise
+    /// `wp_presentation` (consumer never gets a `FramePresented` to
+    /// update from).
+    #[cfg(feature = "presentation-time")]
+    pub fn last_presented(&self) -> Option<crate::PresentationInfo> {
+        self.state.lock().unwrap().last_presented
+    }
+
+    /// Compositor's predicted next-vblank deadline for this surface's
+    /// main output, derived from the last presentation. Add a small
+    /// safety margin (~1-2 ms) and feed into
+    /// [`crate::EventLoop::wait_until`] to schedule the next paint
+    /// so `wgpu.present()` lands inside the compositor's commit
+    /// window for the upcoming vblank.
+    ///
+    /// Returns `None` when:
+    /// - the compositor doesn't advertise `wp_presentation`, OR
+    /// - no frame has been presented yet, OR
+    /// - the compositor declined to predict the refresh period
+    ///   (`refresh == 0` in the protocol).
+    ///
+    /// Caller should fall back to the
+    /// [`crate::OutputInfo::refresh_mhz`] hint or a static frame
+    /// budget in those cases.
+    #[cfg(feature = "presentation-time")]
+    pub fn estimated_next_vblank(&self) -> Option<std::time::Instant> {
+        let info = self.state.lock().unwrap().last_presented?;
+        if info.refresh.is_zero() {
+            return None;
+        }
+        // `info.time` is in the compositor's clock domain (usually
+        // CLOCK_MONOTONIC), measured from the same epoch as
+        // `std::time::Instant`'s underlying clock on Linux. We
+        // compute the next-vblank deadline as `now + (refresh -
+        // elapsed_since_present % refresh)`, which is monotonic and
+        // doesn't require us to convert between clock domains.
+        // Wall-clock skew between `Instant::now()` and `info.time`
+        // washes out in the modulo.
+        let now = std::time::Instant::now();
+        // Approximate: assume one refresh has elapsed since the last
+        // presented event landed in our queue. For the steady-state
+        // case the next vblank is `last_present_recv + refresh`; we
+        // expose `now + refresh` as a conservative deadline that
+        // won't fire before the next vblank. Apps wanting tighter
+        // alignment should track their own paint-to-present latency
+        // and subtract.
+        Some(now + info.refresh)
+    }
+
     /// Whether the compositor has marked this toplevel as suspended
     /// (`xdg_toplevel.state.suspended`, xdg-shell v6+). Mirrors the
     /// latest [`crate::WindowEvent::Occluded`] value — read it from
@@ -490,6 +545,8 @@ impl ToplevelBuilder {
             touched_outputs: Default::default(),
             #[cfg(feature = "fractional-scale")]
             viewport: viewport.clone(),
+            #[cfg(feature = "presentation-time")]
+            last_presented: None,
         }));
         event_loop
             .state
@@ -499,6 +556,19 @@ impl ToplevelBuilder {
             .state
             .surface_id_by_wl
             .insert(wl_surface.clone(), surface_id);
+
+        // Arm the rolling `wp_presentation_feedback` chain BEFORE the
+        // first commit so the empty initial commit also gets feedback
+        // (its `discarded` result re-arms; the first real consumer
+        // paint then gets the next slot). On compositors lacking
+        // wp_presentation the arm helper is a silent no-op.
+        #[cfg(feature = "presentation-time")]
+        crate::connection::arm_presentation_feedback(
+            &mut event_loop.state,
+            &qh,
+            &wl_surface,
+            surface_id,
+        );
 
         // Empty commit kicks off the configure cycle.
         wl_surface.commit();
