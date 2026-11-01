@@ -4,8 +4,7 @@ Wayland-first windowing toolkit for Rust.
 
 `wayr` is a minimal, opinionated alternative to winit aimed at
 [kryptic-sh](https://github.com/kryptic-sh) apps —
-[buffr](https://github.com/kryptic-sh/buffr),
-[pikr](https://github.com/kryptic-sh/pikr), and future GUI work.
+[buffr](https://github.com/kryptic-sh/buffr) and future GUI work.
 
 ## What it is
 
@@ -50,8 +49,8 @@ is **not** part of that family. The name similarity is coincidence; pin `wayr`
 
 v0.1 — Wayland-first protocol surface complete (toplevel, layer-shell,
 subsurface, fractional-scale + multi-output, text-input-v3 IME, cursor-shape,
-high-res scroll, touch). Pre-alpha; API is locked in shape but consumers (buffr,
-pikr) are still validating in tree. See [umbrella issue #1] for the long-term
+high-res scroll, touch). Pre-alpha; API is locked in shape but its consumer
+(buffr) is still validating in tree. See [umbrella issue #1] for the long-term
 plan and [issues](https://github.com/kryptic-sh/wayr/issues) for the live punch
 list.
 
